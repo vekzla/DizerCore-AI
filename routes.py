@@ -106,6 +106,7 @@ async def run(
     openrouter: str = Form("on"),  
     groq: str = Form("on"),  
     gemini: str = Form("on"),  
+    inkling: str = Form("on"),  
     files: list[UploadFile] = File(default=[]),  
 ):  
     user = current_user(request)  
@@ -146,7 +147,8 @@ async def run(
         complexity=complexity,  
         stages={"openrouter": openrouter == "on",  
                 "groq": groq == "on",  
-                "gemini": gemini == "on"},  
+                "gemini": gemini == "on",  
+                "inkling": inkling == "on"},  
     )  
     runtime.JOBS[job.id] = job  
     save_job(job)  
