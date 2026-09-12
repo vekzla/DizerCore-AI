@@ -9,7 +9,7 @@ cleaned, verified code.
 2. **Groq (Cloud)** verifies that code against your original input, fixes issues, and returns improved code.  
 3. **Gemini (Google AI Studio)** returns the final cleaned, optimised and refactored code.  
   
-Each stage has its own on/off toggle. If a model hits a paywall/quota, untick it —  
+Each stage has its own on/off toggle. If a model hits a paywall/quota, untick it  
 a disabled stage shows a **"skipped"** marker and forwards the previous stage's  
 output (stage 1 off = your raw input passes straight to Groq).  
   
