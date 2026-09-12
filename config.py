@@ -44,6 +44,19 @@ MAX_SAFETYWALL_TRIES = 3        # cap for junk-retry loops
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))  
   
 # --------------------------------------------------------------------------- #  
+# Inkling — the SOLE confidence judge.  
+#   It reads each stage's output against the user's ORIGINAL request and scores  
+#   0-100. It is NEVER fed the other models' self-assessments — only the raw  
+#   request + that stage's output. It is also used as an OpenRouter *fallback*  
+#   generator, and because it is a reasoning model it must be called with  
+#   reasoning enabled (see OPENROUTER_REASONING_MODELS below).  
+# --------------------------------------------------------------------------- #  
+INKLING_MODEL = os.environ.get("INKLING_MODEL", "thinkingmachines/inkling-small:free")  
+  
+# OpenRouter slugs that must be sent {"reasoning": {"enabled": True}}.  
+OPENROUTER_REASONING_MODELS = {INKLING_MODEL}  
+  
+# --------------------------------------------------------------------------- #  
 # Complexity tiers  
 #   The USER picks a complexity 1-5 in the dashboard (NOT an auto-classifier).  
 #   1-2 -> light, 3 -> normal, 4-5 -> heavy. If a level-3 run gives poor  
@@ -81,11 +94,12 @@ def _tier_map(var: str, light: list, normal: list, heavy: list) -> dict:
   
 # NOTE: verify each slug is live on the provider's models page. A wrong/retired  
 # slug just errors and the safetywall rotates to the next one in the list.  
+# Inkling is appended to every OpenRouter tier as the LAST-resort fallback.  
 OPENROUTER_MODELS_BY_TIER = _tier_map(  
     "OPENROUTER_MODEL",  
-    light=["google/gemma-4-31b-it:free"],  
-    normal=["poolside/laguna-s-2.1:free"],  
-    heavy=["nex-agi/nex-n2.5-pro:free"],  
+    light=["google/gemma-4-31b-it:free", INKLING_MODEL],  
+    normal=["poolside/laguna-s-2.1:free", INKLING_MODEL],  
+    heavy=["nex-agi/nex-n2.5-pro:free", INKLING_MODEL],  
 )  
 GROQ_MODELS_BY_TIER = _tier_map(  
     "GROQ_MODEL",  
