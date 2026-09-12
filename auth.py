@@ -8,10 +8,8 @@ import time
   
 from fastapi import HTTPException, Request  
   
+import runtime  
 from config import USERS_DB, SESSIONS_DB  
-  
-# In-memory session cache (mirrors the SQLite sessions table for fast lookups).  
-SESSIONS: dict[str, str] = {}  
   
 COOKIE_NAME = "dizer_session"  
   
@@ -89,7 +87,7 @@ def delete_session(token: str) -> None:
 # --------------------------------------------------------------------------- #  
 def current_user(request: Request) -> str:  
     token = request.cookies.get(COOKIE_NAME)  
-    user = SESSIONS.get(token or "")  
+    user = runtime.SESSIONS.get(token or "")  
     if not user:  
         raise HTTPException(status_code=401, detail="Not authenticated")  
     return user  
