@@ -192,7 +192,7 @@ ok "Installing systemd service"
 {  
   printf '[Unit]\n'  
   printf 'Description=%s\n' "$APP_NAME"  
-  printf 'After=network-online.target %s\n' "$DATA_MOUNT"  
+  printf 'After=network-online.target\n'  
   printf 'Wants=network-online.target\n'  
   printf 'RequiresMountsFor=%s\n' "$DATA_MOUNT"  
   printf '\n'  
@@ -208,7 +208,7 @@ ok "Installing systemd service"
   printf '\n'  
   printf '[Install]\n'  
   printf 'WantedBy=multi-user.target\n'  
-} | sudo tee "$SERVICE" >/dev/null  
+} | sudo tee "$SERVICE" >/dev/null
   
 sudo systemctl daemon-reload  
 sudo systemctl enable "$SERVICE_NAME"  
