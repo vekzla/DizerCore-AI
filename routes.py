@@ -2,7 +2,7 @@
 # DizercoreAI — FastAPI route handlers.  
 # Auth routes (/login, /register, /logout), app routes (/, /run, /jobs,  
 # DELETE /jobs/{id}, /status, /stop, /version, /favicon.ico).  
-# Wired to pipeline.run_pipeline and the per-job complexity (1-5) selector.  
+# Shared job/session state lives on runtime.* (populated at startup by lifespan).  
 import asyncio  
 import secrets  
 import uuid  
@@ -14,11 +14,12 @@ from fastapi.responses import (
     HTMLResponse, JSONResponse, RedirectResponse,  
 )  
   
+import runtime  
 from config import (  
     MAX_PROMPT_CHARS, MAX_FILE_BYTES, MAX_TOTAL_FILE_BYTES, logger,  
 )  
 from db import (  
-    State, Job, JOBS, TASKS, SESSIONS,  
+    State, Job,  
     save_job, delete_job_row, save_session, delete_session,  
 )  
 from auth import (  
@@ -45,7 +46,7 @@ async def login(username: str = Form(...), password: str = Form(...)):
     if not verify_user(username.strip(), password):  
         raise HTTPException(status_code=401, detail="Invalid username or password.")  
     token = secrets.token_urlsafe(32)  
-    SESSIONS[token] = username.strip()  
+    runtime.SESSIONS[token] = username.strip()  
     save_session(token, username.strip())  
     resp = RedirectResponse("/", status_code=303)  
     resp.set_cookie("dizer_session", token, httponly=True, samesite="lax")  
@@ -74,7 +75,7 @@ async def register(username: str = Form(...), password: str = Form(...)):
 @router.post("/logout")  
 async def logout(request: Request):  
     token = request.cookies.get("dizer_session")  
-    SESSIONS.pop(token or "", None)  
+    runtime.SESSIONS.pop(token or "", None)  
     delete_session(token or "")  
     resp = RedirectResponse("/login", status_code=303)  
     resp.delete_cookie("dizer_session")  
@@ -87,7 +88,7 @@ async def logout(request: Request):
 @router.get("/", response_class=HTMLResponse)  
 async def index(request: Request):  
     token = request.cookies.get("dizer_session")  
-    if not SESSIONS.get(token or ""):  
+    if not runtime.SESSIONS.get(token or ""):  
         return RedirectResponse("/login", status_code=303)  
     return HTMLResponse(DASHBOARD_HTML)  
   
@@ -131,7 +132,6 @@ async def run(
         try:  
             text = raw.decode("utf-8")  
         except UnicodeDecodeError:  
-            # Binary (e.g. image) — note it but don't try to inline it.  
             prompt += f"\n\n[Attached binary file: {f.filename} ({len(raw)} bytes)]"  
             continue  
         prompt += f"\n\n--- FILE: {f.filename} ---\n{text}"  
@@ -148,16 +148,16 @@ async def run(
                 "groq": groq == "on",  
                 "gemini": gemini == "on"},  
     )  
-    JOBS[job.id] = job  
+    runtime.JOBS[job.id] = job  
     save_job(job)  
-    TASKS[job.id] = asyncio.create_task(run_pipeline(job))  
+    runtime.TASKS[job.id] = asyncio.create_task(run_pipeline(job))  
     return JSONResponse({"job_id": job.id})  
   
   
 @router.get("/jobs")  
 async def jobs(request: Request):  
     user = current_user(request)  
-    mine = [j for j in JOBS.values() if j.owner == user]  
+    mine = [j for j in runtime.JOBS.values() if j.owner == user]  
     mine.sort(key=lambda j: j.created_at, reverse=True)  
     return JSONResponse([  
         {"id": j.id, "state": j.state, "created_at": j.created_at,  
@@ -169,15 +169,14 @@ async def jobs(request: Request):
 @router.delete("/jobs/{job_id}")  
 async def delete_job(job_id: str, request: Request):  
     user = current_user(request)  
-    job = JOBS.get(job_id)  
+    job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
         raise HTTPException(status_code=404, detail="Job not found.")  
-    # Cancel a running task before removing it.  
-    task = TASKS.get(job_id)  
+    task = runtime.TASKS.get(job_id)  
     if task and not task.done():  
         task.cancel()  
-    JOBS.pop(job_id, None)  
-    TASKS.pop(job_id, None)  
+    runtime.JOBS.pop(job_id, None)  
+    runtime.TASKS.pop(job_id, None)  
     delete_job_row(job_id)  
     return JSONResponse({"ok": True})  
   
@@ -185,7 +184,7 @@ async def delete_job(job_id: str, request: Request):
 @router.get("/status/{job_id}")  
 async def status(job_id: str, request: Request):  
     user = current_user(request)  
-    job = JOBS.get(job_id)  
+    job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
         raise HTTPException(status_code=404, detail="Job not found.")  
     return JSONResponse({  
@@ -198,10 +197,10 @@ async def status(job_id: str, request: Request):
 @router.post("/stop/{job_id}")  
 async def stop(job_id: str, request: Request):  
     user = current_user(request)  
-    job = JOBS.get(job_id)  
+    job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
         raise HTTPException(status_code=404, detail="Job not found.")  
-    task = TASKS.get(job_id)  
+    task = runtime.TASKS.get(job_id)  
     if task and not task.done():  
         task.cancel()  
     return JSONResponse({"ok": True})  
