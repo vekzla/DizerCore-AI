@@ -6,9 +6,10 @@
 # Shared clients/keys are read from runtime.* (set at startup) — NOT imported  
 # from config as an instance, which avoids the import-time ImportError.  
 #  
-# Confidence is judged ONLY by Inkling (inkling_confidence), which reads a  
-# stage's output against the user's original request. The generator AIs no  
-# longer self-score.  
+# Confidence is judged by the JUDGE_MODELS pool (judge_confidence): each judge  
+# reads a stage's output against the user's original request and scores it  
+# 0-100. Non-numeric judges are dropped and replaced by JUDGE_FALLBACK_MODELS.  
+# The surviving numeric scores are averaged. Generator AIs never self-score.  
 import asyncio  
 import logging  
   
@@ -21,11 +22,13 @@ from config import (
     OPENROUTER_MODELS_BY_TIER,  
     GROQ_MODELS_BY_TIER,  
     GEMINI_MODELS_BY_TIER,  
-    INKLING_MODEL,  
+    JUDGE_MODELS,  
+    JUDGE_FALLBACK_MODELS,  
     REASONING_MODELS,  
+    _is_unusable,  
 )  
   
-logger = logging.getLogger("dizercore")  
+logger = logging.getLogger("DizerCore")  
   
   
 # ---------------------------------------------------------------------------  
@@ -45,16 +48,9 @@ def tier_for(complexity: int) -> str:
   
   
 def is_unusable(text: str) -> bool:  
-    """True if a stage produced nothing, or deflected instead of doing the work."""  
-    if not text or not text.strip():  
-        return True  
-    low = text.lower()  
-    deflections = (  
-        "paste the code", "please provide", "could you please",  
-        "share the code", "provide the code", "no code provided",  
-        "no code was provided", "i don't see any code", "once i have the",  
-    )  
-    return any(d in low for d in deflections)  
+    """True if a stage produced nothing, or deflected instead of doing the work.  
+    Delegates to config._is_unusable so the deflection list never diverges."""  
+    return _is_unusable(text)  
   
   
 # ---------------------------------------------------------------------------  
@@ -67,8 +63,8 @@ async def _openrouter_once(prompt: str, model: str, max_tokens: int) -> str:
         "messages": [{"role": "user", "content": prompt}],  
         "max_tokens": max_tokens,  
     }  
-    # Reasoning models (e.g. Inkling) need the reasoning flag; we still read  
-    # only the final `content`, ignoring `reasoning_details`.  
+    # Reasoning models need the reasoning flag; we still read only the final  
+    # `content`, ignoring `reasoning_details`.  
     if model in REASONING_MODELS:  
         body["reasoning"] = {"enabled": True}  
     r = await runtime.http_client.post(  
@@ -120,9 +116,12 @@ async def _gemini_once(prompt: str, model: str, max_tokens: int) -> str:
 # ---------------------------------------------------------------------------  
 async def _rotate(call_once, models: list, prompt: str, max_tokens: int):  
     """Try each slug in the tier; retry on junk. Returns (text, slug_used)."""  
+    if not models:  
+        logger.warning("Rotation called with an empty model list; skipping.")  
+        return "", ""  
     last = ""  
-    used = models[0] if models else ""  
-    for slug in models[:MAX_SAFETYWALL_TRIES] or [used]:  
+    used = models[0]  
+    for slug in models[:MAX_SAFETYWALL_TRIES]:  
         used = slug  
         try:  
             last = await call_once(prompt, slug, max_tokens)  
@@ -154,10 +153,12 @@ async def gemini_generate(prompt, tier="normal", max_tokens=1500):
   
   
 # ---------------------------------------------------------------------------  
-# Confidence — judged ONLY by Inkling (reasoning model on OpenRouter).  
-# It reads a stage's OUTPUT against the user's original REQUEST and returns a  
-# 0-100 integer. Generator AIs never post to it; it only reads their output.  
-# Swallows all errors so it never fails a job.  
+# Confidence — judged by the JUDGE_MODELS pool (reasoning models on OpenRouter).  
+# Each judge reads a stage's OUTPUT against the user's original REQUEST and  
+# returns a 0-100 integer. A judge that errors or returns non-numeric output is  
+# DISCARDED and replaced by the next unused JUDGE_FALLBACK_MODELS slug. The  
+# surviving numeric scores are averaged. Swallows all errors so it never fails  
+# a job.  
 # ---------------------------------------------------------------------------  
 _CONF_PROMPT = (  
     "You are an impartial judge. Rate from 0 to 100 how well the CODE satisfies "  
@@ -168,15 +169,52 @@ _CONF_PROMPT = (
 _CONF_MAX_TOKENS = 512  
   
   
-async def inkling_confidence(request: str, code: str) -> str:  
-    """Sole confidence judge. Returns a 0-100 integer string, or '' on error."""  
-    if not INKLING_MODEL:  
-        return ""  
+def _parse_score(out: str):  
+    """Extract a 0-100 integer from a judge's raw output, or None if none."""  
+    digits = "".join(ch for ch in out if ch.isdigit())[:3]  
+    if not digits:  
+        return None  
+    try:  
+        val = int(digits)  
+    except (TypeError, ValueError):  
+        return None  
+    return max(0, min(100, val))  
+  
+  
+async def _judge_once(model: str, request: str, code: str):  
+    """Run a single judge slug. Returns an int score or None (error/non-numeric)."""  
     try:  
         out = await _openrouter_once(  
             _CONF_PROMPT.format(req=request, code=code),  
-            INKLING_MODEL, _CONF_MAX_TOKENS)  
-        digits = "".join(ch for ch in out if ch.isdigit())[:3]  
-        return digits if digits else ""  
-    except Exception:                                # noqa: BLE001  
-        return ""
+            model, _CONF_MAX_TOKENS)  
+    except Exception as e:                           # noqa: BLE001  
+        logger.warning("Judge %s failed: %s", model, e)  
+        return None  
+    score = _parse_score(out)  
+    if score is None:  
+        logger.info("Judge %s returned non-numeric output; discarding.", model)  
+    return score  
+  
+  
+async def judge_confidence(request: str, code: str) -> str:  
+    """Average the numeric scores from JUDGE_MODELS. Any judge that errors or  
+    returns non-numeric output is dropped and replaced by the next unused slug  
+    from JUDGE_FALLBACK_MODELS. Returns the rounded mean as a string, or ''  
+    if no judge (primary or fallback) produced a usable integer."""  
+    fallbacks = list(JUDGE_FALLBACK_MODELS)  
+    scores = []  
+    for model in JUDGE_MODELS:  
+        score = await _judge_once(model, request, code)  
+        while score is None and fallbacks:  
+            spare = fallbacks.pop(0)  
+            logger.info("Replacing dropped judge with fallback %s.", spare)  
+            score = await _judge_once(spare, request, code)  
+        if score is not None:  
+            scores.append(score)  
+    if not scores:  
+        return ""  
+    return str(round(sum(scores) / len(scores)))  
+  
+  
+# Backward-compatible alias: older callers import `inkling_confidence`.  
+inkling_confidence = judge_confidence
