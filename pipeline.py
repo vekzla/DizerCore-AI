@@ -3,12 +3,11 @@
 # Stage 1 OpenRouter (generate) -> Stage 2 Groq (verify) -> Stage 3 Gemini (final clean).  
 # The user-set complexity (1-5) picks ONE tier for the whole job:  
 #   1-2 = light, 3 = normal, 4-5 = heavy.  
-# Each stage: skip marker if unticked, safetywall retry on junk, per-stage  
-# model-used + confidence recorded into job.steps.  
 import asyncio  
 import logging  
   
-from db import State, Job, save_job, TASKS  
+import runtime  
+from db import State, Job, save_job  
 from providers import (  
     openrouter_generate,  
     groq_generate,  
@@ -18,13 +17,8 @@ from providers import (
   
 logger = logging.getLogger("DizerCore")  
   
-MAX_CONCURRENT_JOBS = 2  
-job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)  
-  
   
 def tier_for(complexity: int) -> str:  
-    """Map the user's 1-5 complexity onto a model tier.  
-    1-2 = light, 3 = normal, 4-5 = heavy. Anything odd defaults to normal."""  
     try:  
         c = int(complexity)  
     except (TypeError, ValueError):  
@@ -37,19 +31,18 @@ def tier_for(complexity: int) -> str:
   
   
 async def _score(stage_label: str, request: str, output: str, job: Job) -> None:  
-    """Per-stage confidence: ask the scorer how well `output` meets `request`.  
-    Wrapped so a scorer 429/paywall just leaves the % blank — never fails the job."""  
+    """Per-stage confidence; a scorer error just leaves the % blank."""  
     try:  
         pct = await confidence(request, output)  
     except Exception as e:  # noqa: BLE001  
         logger.info("Job %s: %s confidence skipped (%s).", job.id, stage_label, e)  
         pct = ""  
-    job.steps.setdefault("confidence", {})[stage_label] = pct  
+    job.steps[stage_label + "_conf"] = pct  
   
   
 async def run_pipeline(job: Job) -> None:  
     try:  
-        async with job_semaphore:  
+        async with runtime.job_semaphore:  
             job.state = State.RUNNING  
             job.touch(); save_job(job)  
   
@@ -57,8 +50,8 @@ async def run_pipeline(job: Job) -> None:
             logger.info("[Job %s] complexity=%s -> tier=%s",  
                         job.id, getattr(job, "complexity", 3), tier)  
   
-            # ---- Stage 1: OpenRouter reads raw input and CREATES the code. ----  
-            code = job.prompt                      # if OpenRouter is off, forward raw input  
+            # ---- Stage 1: OpenRouter creates the code. ----  
+            code = job.prompt  
             if job.stages.get("openrouter", True):  
                 logger.info("[Job %s] STAGE 1/3 OpenRouter generating (tier=%s)...",  
                             job.id, tier)  
@@ -67,16 +60,16 @@ async def run_pipeline(job: Job) -> None:
                     "Return ONLY code, minimal comments. Do NOT ask for the code — "  
                     "you must produce it yourself.\n\nREQUEST:\n" + job.prompt)  
                 code, model_used = await openrouter_generate(gen_prompt, tier=tier)  
-                job.steps["model"] = {"generate": model_used}  
+                job.steps["generate_model"] = model_used  
                 await _score("generate", job.prompt, code, job)  
             else:  
                 code = "[OpenRouter skipped — using your raw input]\n\n" + job.prompt  
-                job.steps.setdefault("model", {})["generate"] = "(skipped)"  
+                job.steps["generate_model"] = "(skipped)"  
             job.steps["generate"] = code  
             job.touch(); save_job(job)  
   
-            # ---- Stage 2: Groq VERIFIES the code against the original input. ----  
-            verify = code                          # if Groq is off, forward stage-1 code  
+            # ---- Stage 2: Groq verifies the code. ----  
+            verify = code  
             if job.stages.get("groq", True):  
                 logger.info("[Job %s] STAGE 2/3 Groq verifying (tier=%s)...",  
                             job.id, tier)  
@@ -86,16 +79,16 @@ async def run_pipeline(job: Job) -> None:
                     "Do NOT ask for the code — it is provided below.\n\n"  
                     "REQUEST:\n" + job.prompt + "\n\nCODE:\n" + code)  
                 verify, model_used = await groq_generate(verify_prompt, tier=tier)  
-                job.steps.setdefault("model", {})["verify"] = model_used  
+                job.steps["verify_model"] = model_used  
                 await _score("verify", job.prompt, verify, job)  
             else:  
                 verify = "[Groq skipped — forwarding OpenRouter's code]\n\n" + code  
-                job.steps.setdefault("model", {})["verify"] = "(skipped)"  
+                job.steps["verify_model"] = "(skipped)"  
             job.steps["verify"] = verify  
             job.touch(); save_job(job)  
   
-            # ---- Stage 3: Gemini VERIFIES vs input, returns final cleaned code. ----  
-            final = verify                         # if Gemini is off, last output is final  
+            # ---- Stage 3: Gemini returns final cleaned code. ----  
+            final = verify  
             if job.stages.get("gemini", True):  
                 logger.info("[Job %s] STAGE 3/3 Gemini final cleanup (tier=%s)...",  
                             job.id, tier)  
@@ -105,11 +98,11 @@ async def run_pipeline(job: Job) -> None:
                     "code, not a verdict.\n\n"  
                     "REQUEST:\n" + job.prompt + "\n\nCODE:\n" + verify)  
                 final, model_used = await gemini_generate(final_prompt, tier=tier)  
-                job.steps.setdefault("model", {})["final"] = model_used  
+                job.steps["final_model"] = model_used  
                 await _score("final", job.prompt, final, job)  
             else:  
                 final = "[Gemini skipped — showing Groq's verified output]\n\n" + verify  
-                job.steps.setdefault("model", {})["final"] = "(skipped)"  
+                job.steps["final_model"] = "(skipped)"  
             job.steps["final"] = final  
             job.touch(); save_job(job)  
   
@@ -128,4 +121,4 @@ async def run_pipeline(job: Job) -> None:
         job.touch(); save_job(job)  
         logger.exception("[Job %s] failed: %s", job.id, e)  
     finally:  
-        TASKS.pop(job.id, None)
+        runtime.TASKS.pop(job.id, None)
