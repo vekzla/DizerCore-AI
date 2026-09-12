@@ -47,7 +47,8 @@ RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))
 # Complexity tiers  
 #   The USER picks a complexity 1-5 in the dashboard (NOT an auto-classifier).  
 #   1-2 -> light, 3 -> normal, 4-5 -> heavy. If a level-3 run gives poor  
-#   output, bump to 4 next time. Each tier maps to one slug per provider.  
+#   output, bump to 4 next time. Each tier maps to a LIST of slugs that the  
+#   safetywall rotates through (first that returns usable output wins).  
 # --------------------------------------------------------------------------- #  
 def tier_for(level) -> str:  
     """Map a 1-5 user complexity level to a tier name."""  
@@ -63,34 +64,40 @@ def tier_for(level) -> str:
     return "heavy"  
   
   
-def _tier_map(var: str, light: str, normal: str, heavy: str) -> dict:  
-    """Per-provider tier map; each tier overridable via {VAR}_{TIER} env vars."""  
+def _tier_map(var: str, light: list, normal: list, heavy: list) -> dict:  
+    """Per-provider tier map of slug LISTS. Each tier is overridable via a  
+    comma-separated {VAR}_{TIER} env var (e.g. OPENROUTER_MODEL_HEAVY=a,b)."""  
+    def _slugs(tier_name: str, default: list) -> list:  
+        raw = os.environ.get(f"{var}_{tier_name}")  
+        if raw:  
+            return [s.strip() for s in raw.split(",") if s.strip()]  
+        return default  
     return {  
-        "light": os.environ.get(f"{var}_LIGHT", light),  
-        "normal": os.environ.get(f"{var}_NORMAL", normal),  
-        "heavy": os.environ.get(f"{var}_HEAVY", heavy),  
+        "light": _slugs("LIGHT", light),  
+        "normal": _slugs("NORMAL", normal),  
+        "heavy": _slugs("HEAVY", heavy),  
     }  
   
   
 # NOTE: verify each slug is live on the provider's models page. A wrong/retired  
-# slug just errors and that stage fails — same failure mode as the old single id.  
-OPENROUTER_MODELS = _tier_map(  
+# slug just errors and the safetywall rotates to the next one in the list.  
+OPENROUTER_MODELS_BY_TIER = _tier_map(  
     "OPENROUTER_MODEL",  
-    light="google/gemma-4-31b-it:free",  
-    normal="poolside/laguna-s-2.1:free",  
-    heavy="nex-agi/nex-n2.5-pro:free",  
+    light=["google/gemma-4-31b-it:free"],  
+    normal=["poolside/laguna-s-2.1:free"],  
+    heavy=["nex-agi/nex-n2.5-pro:free"],  
 )  
-GROQ_MODELS = _tier_map(  
+GROQ_MODELS_BY_TIER = _tier_map(  
     "GROQ_MODEL",  
-    light="openai/gpt-oss-20b",  
-    normal="openai/gpt-oss-120b",  
-    heavy="openai/gpt-oss-120b",  
+    light=["openai/gpt-oss-20b"],  
+    normal=["openai/gpt-oss-120b"],  
+    heavy=["openai/gpt-oss-120b"],  
 )  
-GEMINI_MODELS = _tier_map(  
+GEMINI_MODELS_BY_TIER = _tier_map(  
     "GEMINI_MODEL",  
-    light="gemini-3.5-flash-lite",  
-    normal="gemini-3.6-flash",  
-    heavy="gemini-3.6-flash",  
+    light=["gemini-3.5-flash-lite"],  
+    normal=["gemini-3.6-flash"],  
+    heavy=["gemini-3.6-flash"],  
 )  
   
 # --------------------------------------------------------------------------- #  
