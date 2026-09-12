@@ -93,12 +93,14 @@ class State(str, Enum):
   
   
 def _default_steps() -> dict:  
-    # Per stage we keep the text output plus which model produced it and a  
-    # 1-100 confidence score. Blank strings render as empty panels in the UI.  
+    # Per stage we keep the text output plus which model produced it and the  
+    # Inkling confidence score. `summary` holds the winner line at the bottom.  
+    # Blank strings render as empty panels in the UI.  
     return {  
         "generate": "", "generate_model": "", "generate_conf": "",  
         "verify": "",   "verify_model": "",   "verify_conf": "",  
         "final": "",    "final_model": "",    "final_conf": "",  
+        "summary": "",  
     }  
   
   
@@ -112,7 +114,7 @@ class Job:
     error: str = ""  
     steps: dict = field(default_factory=_default_steps)  
     stages: dict = field(default_factory=lambda: {  
-        "openrouter": True, "groq": True, "gemini": True})  
+        "openrouter": True, "groq": True, "gemini": True, "inkling": True})  
     created_at: float = field(default_factory=time.time)  
     updated_at: float = field(default_factory=time.time)  
   
@@ -151,6 +153,12 @@ def load_jobs() -> dict:
                 d["error"] = "Server restarted while job was running."  
             # Backfill new fields for jobs saved by an older version.  
             d.setdefault("complexity", 3)  
+            stages = d.get("stages", {}) or {}  
+            stages.setdefault("openrouter", True)  
+            stages.setdefault("groq", True)  
+            stages.setdefault("gemini", True)  
+            stages.setdefault("inkling", True)  
+            d["stages"] = stages  
             merged = _default_steps()  
             merged.update(d.get("steps", {}))  
             d["steps"] = merged  
