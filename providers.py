@@ -141,22 +141,56 @@ async def gemini_generate(prompt, tier="normal", max_tokens=1500):
   
   
 # ---------------------------------------------------------------------------  
-# Per-stage confidence (0-100). Swallows all errors so it never fails a job.  
+# Per-stage confidence (0-100).  
+# Each stage is scored by its OWN provider so a single provider being  
+# rate-limited never blanks every score. A bigger token budget is used than  
+# before (8 was too small — reasoning models spent it all before emitting the  
+# number, so the score always came back empty). Swallows all errors so it  
+# never fails a job.  
 # ---------------------------------------------------------------------------  
-async def confidence(request: str, code: str) -> str:  
-    """Ask a light Groq model to rate 0-100 how well `code` meets `request`.  
-    Swallows all errors so it never fails a job."""  
-    models = (GROQ_MODELS_BY_TIER.get("light")  
-              or GROQ_MODELS_BY_TIER.get("normal") or [])  
-    if not models:  
+_CONF_PROMPT = (  
+    "Rate from 0 to 100 how well the CODE satisfies the REQUEST. "  
+    "Reply with ONLY the integer, nothing else.\n\n"  
+    "REQUEST:\n{req}\n\nCODE:\n{code}"  
+)  
+_CONF_MAX_TOKENS = 512  
+  
+  
+def _first_slug(table: dict) -> str:  
+    """First available slug across tiers, preferring the cheapest (light)."""  
+    for tier in ("light", "normal", "heavy"):  
+        slugs = table.get(tier)  
+        if slugs:  
+            return slugs[0]  
+    return ""  
+  
+  
+async def _confidence(call_once, model: str, request: str, code: str) -> str:  
+    if not model:  
         return ""  
     try:  
-        out = await _groq_once(  
-            "Rate from 0 to 100 how well the CODE satisfies the REQUEST. "  
-            "Reply with ONLY the integer.\n\nREQUEST:\n" + request +  
-            "\n\nCODE:\n" + code,  
-            models[0], 8)  
+        out = await call_once(  
+            _CONF_PROMPT.format(req=request, code=code),  
+            model, _CONF_MAX_TOKENS)  
         digits = "".join(ch for ch in out if ch.isdigit())[:3]  
         return digits if digits else ""  
-    except Exception:  # noqa: BLE001  
-        return ""
+    except Exception:                                # noqa: BLE001  
+        return ""  
+  
+  
+async def openrouter_confidence(request: str, code: str) -> str:  
+    return await _confidence(_openrouter_once,  
+                             _first_slug(OPENROUTER_MODELS_BY_TIER),  
+                             request, code)  
+  
+  
+async def groq_confidence(request: str, code: str) -> str:  
+    return await _confidence(_groq_once,  
+                             _first_slug(GROQ_MODELS_BY_TIER),  
+                             request, code)  
+  
+  
+async def gemini_confidence(request: str, code: str) -> str:  
+    return await _confidence(_gemini_once,  
+                             _first_slug(GEMINI_MODELS_BY_TIER),  
+                             request, code)
