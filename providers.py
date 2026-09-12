@@ -17,7 +17,8 @@ from google.genai import types
   
 import runtime  
 from config import (  
-    RATE_LIMIT_DELAY,  
+    RATE_LIMIT_DELAY,
+    MAX_OUTPUT_TOKENS,
     MAX_SAFETYWALL_TRIES,  
     OPENROUTER_MODELS_BY_TIER,  
     GROQ_MODELS_BY_TIER,  
@@ -134,22 +135,22 @@ async def _rotate(call_once, models: list, prompt: str, max_tokens: int):
     return last, used  
   
   
-async def openrouter_generate(prompt, tier="normal", max_tokens=1500):  
+async def openrouter_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):  
     return await _rotate(_openrouter_once,  
                          OPENROUTER_MODELS_BY_TIER.get(tier, []),  
                          prompt, max_tokens)  
   
   
-async def groq_generate(prompt, tier="normal", max_tokens=1500):  
+async def groq_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):  
     return await _rotate(_groq_once,  
                          GROQ_MODELS_BY_TIER.get(tier, []),  
                          prompt, max_tokens)  
   
   
-async def gemini_generate(prompt, tier="normal", max_tokens=1500):  
+async def gemini_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):  
     return await _rotate(_gemini_once,  
                          GEMINI_MODELS_BY_TIER.get(tier, []),  
-                         prompt, max_tokens)  
+                         prompt, max_tokens)
   
   
 # ---------------------------------------------------------------------------  
