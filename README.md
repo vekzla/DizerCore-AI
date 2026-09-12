@@ -43,15 +43,19 @@ or errors, it rotates to the next. The panel shows **which model was used** and 
   
 ## Project layout
 
-config.py # env loading, path constants, per-tier model tables, judges, throttle knobs
-db.py # SQLite users/sessions/jobs (single source of truth), State enum, Job dataclass
-providers.py # OpenRouter/Groq/Gemini calls, rotation, safetywall, judge-pool confidence
-pipeline.py # run_pipeline: tier select, 3 stages, judge scoring, skip markers, logging
-auth.py # cookie-session current_user + login/register HTML (store re-exported from db.py)
-routes.py # FastAPI routes (/run, /jobs, DELETE /jobs/{id}, /status, /stop)
-web.py # DASHBOARD_HTML (logo, complexity selector, confidence, controls)
-dizercoreai.py # entrypoint: app, lifespan, StaticFiles mount, uvicorn
-static/dizercore.png # logo (shown in dashboard + used as favicon) & install.sh # one-shot Pi installer
+| File | Purpose |
+| --- | --- |
+| config.py | env loading, path constants, per-tier model tables, judges, throttle knobs |
+| db.py | SQLite users/sessions/jobs (single source of truth), State enum, Job dataclass |
+| providers.py | OpenRouter/Groq/Gemini calls, rotation, safetywall, judge-pool confidence |
+| pipeline.py | run_pipeline: tier select, 3 stages, judge scoring, skip markers, logging |
+| auth.py | cookie-session current_user + login/register HTML (store re-exported from db.py) |
+| routes.py | FastAPI routes (/run, /jobs, DELETE /jobs/{id}, /status, /stop) |
+| web.py | DASHBOARD_HTML (logo, complexity selector, confidence, controls) |
+| dizercoreai.py | entrypoint: app, lifespan, StaticFiles mount, uvicorn |
+| static/dizercore.png | logo (shown in dashboard + used as favicon) |
+| install.sh | one-shot Pi installer |
+
 
 ## Install (Raspberry Pi 5)  
 One-shot installer (clones the repo, mounts/points at the SSD, prompts for API  
@@ -72,7 +76,7 @@ the keys and data dir to /mnt/dizerdata/dizercore/dizercore.env.
 
 To override the models or tiers, add the matching singular *_MODEL_LIGHT,
 *_MODEL_NORMAL, *_MODEL_HEAVY line (comma-separated slug lists) to that env
-file — e.g. OPENROUTER_MODEL_HEAVY=slug-a,slug-b. To change the judges, set
+file e.g. OPENROUTER_MODEL_HEAVY=slug-a,slug-b. To change the judges, set
 JUDGE_MODELS and optionally JUDGE_FALLBACK_MODELS. 
 Then restart:
 sudo nano /mnt/dizerdata/dizercore/dizercore.env  
@@ -97,8 +101,8 @@ Notes / limitations
     Data (SQLite DBs, uploads) lives on the SSD under DIZER_DATA_DIR, keeping the microSD free.
     Free-tier caps still apply per provider/model/day; when one is exhausted, untick it
     or bump the tier to a different slug. The safetywall only retries junk, not 429s.
-    A wrong/retired model slug is silently skipped and wastes a rotation slot — verify
-    slugs on each provider's models page.
+    A wrong/retired model slug is silently skipped and wastes a rotation slot verify
+    slugs on each provider's models page. 
     Attached images are recorded as a placeholder note in the prompt (the pipeline is
     text/code-oriented), not analysed as vision input.
 
