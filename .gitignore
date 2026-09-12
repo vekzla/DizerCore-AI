@@ -1,0 +1,18 @@
+# Python  
+__pycache__/  
+*.py[cod]  
+venv/  
+.venv/  
+  
+# Local secrets / data  
+.env  
+dizercore.env  
+*.db  
+*.sqlite3  
+  
+# OS noise  
+.DS_Store  
+Thumbs.db  
+  
+# Keep the logo tracked even though images are otherwise ignored  
+!static/dizercore.png
