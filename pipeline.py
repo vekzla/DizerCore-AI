@@ -3,9 +3,10 @@
 # Stage 1 OpenRouter (generate) -> Stage 2 Groq (verify) -> Stage 3 Gemini (final clean).  
 # The user-set complexity (1-5) picks ONE tier for the whole job:  
 #   1-2 = light, 3 = normal, 4-5 = heavy.  
-# Confidence: a SINGLE judge (Inkling) scores each stage's output against the  
-# user's original request. The generators never self-score. After all stages,  
-# the stage with the HIGHEST % is declared the winner in the summary box.  
+# Confidence is judged ONLY by Inkling AFTER all stages run: it reads each  
+# stage's output against the user's original request, scores it 0-100, and the  
+# highest-scoring stage becomes the "best" summary. The generator AIs never  
+# self-score.  
 import asyncio  
 import logging  
   
@@ -15,17 +16,10 @@ from providers import (
     openrouter_generate,  
     groq_generate,  
     gemini_generate,  
-    judge_confidence,  
+    inkling_confidence,  
 )  
   
 logger = logging.getLogger("DizerCore")  
-  
-# Maps internal step labels -> the friendly provider name shown in the summary.  
-_STAGE_NAMES = {  
-    "generate": "OpenRouter",  
-    "verify": "Groq",  
-    "final": "Gemini",  
-}  
   
   
 def tier_for(complexity: int) -> str:  
@@ -38,44 +32,6 @@ def tier_for(complexity: int) -> str:
     if c >= 4:  
         return "heavy"  
     return "normal"  
-  
-  
-async def _score(stage_label: str, request: str, output: str, job: Job) -> None:  
-    """Inkling scores this stage against the user's request. Only runs when the  
-    Inkling judge is enabled for the job; any scorer error leaves the % blank."""  
-    if not job.stages.get("inkling", True):  
-        return  
-    try:  
-        pct = await judge_confidence(request, output)  
-    except Exception as e:  # noqa: BLE001  
-        logger.info("Job %s: %s confidence skipped (%s).", job.id, stage_label, e)  
-        pct = ""  
-    job.steps[stage_label + "_conf"] = pct  
-  
-  
-def _pick_winner(job: Job) -> None:  
-    """Winner = the stage with the highest Inkling %. Reuses the already-computed  
-    per-stage scores (no extra model call) and writes the summary box text."""  
-    if not job.stages.get("inkling", True):  
-        job.steps["summary"] = ""  
-        return  
-    scored = []  
-    for label, name in _STAGE_NAMES.items():  
-        raw = job.steps.get(label + "_conf", "")  
-        try:  
-            val = int(raw)  
-        except (TypeError, ValueError):  
-            continue  
-        scored.append((val, name))  
-    if not scored:  
-        job.steps["summary"] = "Inkling could not score any stage."  
-        return  
-    scored.sort(reverse=True)               # highest % first  
-    val, name = scored[0]  
-    job.steps["summary"] = (  
-        f"Best output: {name} — {val}% confidence "  
-        f"(highest of the {len(scored)} stage(s) scored by Inkling)."  
-    )  
   
   
 async def run_pipeline(job: Job) -> None:  
@@ -99,7 +55,6 @@ async def run_pipeline(job: Job) -> None:
                     "you must produce it yourself.\n\nREQUEST:\n" + job.prompt)  
                 code, model_used = await openrouter_generate(gen_prompt, tier=tier)  
                 job.steps["generate_model"] = model_used  
-                await _score("generate", job.prompt, code, job)  
             else:  
                 code = "[OpenRouter skipped — using your raw input]\n\n" + job.prompt  
                 job.steps["generate_model"] = "(skipped)"  
@@ -118,7 +73,6 @@ async def run_pipeline(job: Job) -> None:
                     "REQUEST:\n" + job.prompt + "\n\nCODE:\n" + code)  
                 verify, model_used = await groq_generate(verify_prompt, tier=tier)  
                 job.steps["verify_model"] = model_used  
-                await _score("verify", job.prompt, verify, job)  
             else:  
                 verify = "[Groq skipped — forwarding OpenRouter's code]\n\n" + code  
                 job.steps["verify_model"] = "(skipped)"  
@@ -137,15 +91,49 @@ async def run_pipeline(job: Job) -> None:
                     "REQUEST:\n" + job.prompt + "\n\nCODE:\n" + verify)  
                 final, model_used = await gemini_generate(final_prompt, tier=tier)  
                 job.steps["final_model"] = model_used  
-                await _score("final", job.prompt, final, job)  
             else:  
                 final = "[Gemini skipped — showing Groq's verified output]\n\n" + verify  
                 job.steps["final_model"] = "(skipped)"  
             job.steps["final"] = final  
             job.touch(); save_job(job)  
   
-            # ---- Inkling summary: whichever stage scored highest wins. ----  
-            _pick_winner(job)  
+            # ---- Inkling judge: sole scorer of every stage. ----  
+            if job.stages.get("inkling", True):  
+                logger.info("[Job %s] Inkling judging each stage...", job.id)  
+                candidates = [  
+                    ("OpenRouter", "generate", code, job.stages.get("openrouter", True)),  
+                    ("Groq",       "verify",   verify, job.stages.get("groq", True)),  
+                    ("Gemini",     "final",    final, job.stages.get("gemini", True)),  
+                ]  
+                scores = []  
+                for name, key, output, ran in candidates:  
+                    if not ran:  
+                        job.steps[key + "_conf"] = ""  
+                        continue  
+                    try:  
+                        pct = await inkling_confidence(job.prompt, output)  
+                    except Exception as e:  # noqa: BLE001  
+                        logger.info("[Job %s] %s scoring skipped (%s).",  
+                                    job.id, name, e)  
+                        pct = ""  
+                    job.steps[key + "_conf"] = pct  
+                    job.touch(); save_job(job)  
+                    try:  
+                        scores.append((int(pct), name, key))  
+                    except (TypeError, ValueError):  
+                        pass  
+                if scores:  
+                    # Highest % wins. Reuse that stored score for the summary.  
+                    scores.sort(reverse=True)  
+                    best_pct, best_name, _best_key = scores[0]  
+                    job.steps["summary"] = (  
+                        f"Best is {best_name} because it scored highest against "  
+                        f"your request ({best_pct}%).")  
+                    job.steps["summary_conf"] = str(best_pct)  
+                else:  
+                    job.steps["summary"] = "Inkling could not score any stage."  
+                    job.steps["summary_conf"] = ""  
+                job.touch(); save_job(job)  
   
             job.state = State.DONE  
             job.touch(); save_job(job)  
