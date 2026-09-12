@@ -65,7 +65,7 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
     <label><input type="checkbox" id="openrouter" checked> OpenRouter (generate code)</label>  
     <label><input type="checkbox" id="groq" checked> Groq (verify vs input)</label>  
     <label><input type="checkbox" id="gemini" checked> Gemini (final cleaned code)</label>  
-    <label><input type="checkbox" id="inkling" checked> Inkling judge (scores each AI vs your input)</label>  
+    <label><input type="checkbox" id="inkling" checked> Judge pool (scores each AI vs your input, highest average wins)</label>  
   </div>  
   <button onclick="run()">Run</button>  
   <button class="stop" onclick="stop()">Stop</button>  
@@ -78,7 +78,7 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   <h3>3. Gemini final cleaned / optimised code</h3>  
   <div class="meta" id="final_meta"></div><pre id="final_out"></pre>  
   <div id="summary_box">  
-    <h3>Inkling judge — best output</h3>  
+    <h3>Judge pool — best output</h3>  
     <div class="meta" id="summary_meta"></div>  
     <pre id="summary"></pre>  
   </div>  
