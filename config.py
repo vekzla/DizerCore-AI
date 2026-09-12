@@ -124,24 +124,38 @@ OPENROUTER_MODELS_BY_TIER = _tier_map(
         "nvidia/nemotron-3-ultra-550b-a55b:free",  
     ],  
 )  
+
+# ---- Groq model rotation, per complexity tier -------------------------------  
+# All limits VERIFIED from the Groq console (Default Project):  
+#   openai/gpt-oss-20b   : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
+#   openai/gpt-oss-120b  : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
+#   qwen/qwen3.6-27b     : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
+#   qwen/qwen3.8-27b     : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
+#   groq/compound        : 30 RPM /   250 RPD / 70K TPM / (no TPD cap)  
+#   groq/compound-mini   : 30 RPM /   250 RPD / 70K TPM / (no TPD cap)  
+# gpt-oss/qwen share an 8K TOKENS-PER-MINUTE cap (prompt + output), so large  
+# jobs 429/413 there; compound* has 70K TPM headroom but only 250 req/day, so  
+# it sits LAST as the big-payload fallback. Audio (orpheus/whisper) and the  
+# prompt-guard / safeguard safety classifiers are intentionally excluded.  
 GROQ_MODELS_BY_TIER = _tier_map(  
     "GROQ_MODEL",  
     light=[  
-        "openai/gpt-oss-20b",  
-        "qwen/qwen3.6-27b",  
-        "groq/compound-mini",  
+        "openai/gpt-oss-20b",     # 1K RPD, 8K TPM  
+        "qwen/qwen3.6-27b",       # 1K RPD, 8K TPM  
+        "groq/compound-mini",     # 250 RPD, 70K TPM (big-payload fallback)  
     ],  
     normal=[  
-        "openai/gpt-oss-120b",  
-        "qwen/qwen3.8-27b",  
-        "groq/compound",  
+        "openai/gpt-oss-120b",    # 1K RPD, 8K TPM  
+        "qwen/qwen3.8-27b",       # 1K RPD, 8K TPM  
+        "groq/compound",          # 250 RPD, 70K TPM (big-payload fallback)  
     ],  
     heavy=[  
-        "openai/gpt-oss-120b",  
-        "qwen/qwen3.8-27b",  
-        "groq/compound",  
+        "openai/gpt-oss-120b",    # 1K RPD, 8K TPM  
+        "qwen/qwen3.8-27b",       # 1K RPD, 8K TPM  
+        "groq/compound",          # 250 RPD, 70K TPM (big-payload fallback)  
     ],  
-)  
+)
+
 GEMINI_MODELS_BY_TIER = _tier_map(  
     "GEMINI_MODEL",  
     # Flash-Lite = 500 RPD / 15 RPM; full Flash = only 20 RPD / 5 RPM.  
