@@ -135,10 +135,17 @@ sudo mkdir -p "$DATA_DIR"
 sudo chown "$USER_NAME:$USER_NAME" "$DATA_DIR"  
   
 # ==================================================================  
-# 5. Clone the repo  
+# 5.0. Clone the repo  
 # ==================================================================  
 ok "Cloning ${REPO}"  
 git clone --branch "$BRANCH" "$REPO" "$APP_DIR"  
+
+# ==================================================================  
+# 5.1. Stamp the installed version (short git SHA) for /version  
+# ==================================================================  
+ok "Stamping version"  
+( cd "$APP_DIR" && git rev-parse --short HEAD > VERSION 2>/dev/null ) \  
+  || echo "unknown" > "$APP_DIR/VERSION"
   
 # Confirm the entrypoint and logo made it through the clone.  
 [ -f "$APP_DIR/$ENTRYPOINT" ] || die "Entrypoint ${ENTRYPOINT} not found in repo; check the file name/case."  
