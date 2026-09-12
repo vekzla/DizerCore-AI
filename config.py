@@ -136,14 +136,27 @@ GROQ_MODELS_BY_TIER = _tier_map(
         "qwen/qwen3.8-27b",  
         "groq/compound",  
     ],  
-) 
+)  
 GEMINI_MODELS_BY_TIER = _tier_map(  
     "GEMINI_MODEL",  
-    light=["gemini-3.5-flash-lite"],  
-    normal=["gemini-3.6-flash"],  
-    heavy=["gemini-3.6-flash"],  
+    # Flash-Lite = 500 RPD / 15 RPM; full Flash = only 20 RPD / 5 RPM.  
+    # Lead every tier with Flash-Lite for headroom; full Flash is heavy-only,  
+    # and Flash-Lite sits under it as the fallback when the 20/day cap is hit.  
+    light=[  
+        "gemini-3.5-flash-lite",  
+        "gemini-3.1-flash-lite",  
+    ],  
+    normal=[  
+        "gemini-3.5-flash-lite",  
+        "gemini-3.1-flash-lite",  
+    ],  
+    heavy=[  
+        "gemini-3.8-flash",  
+        "gemini-3.6-flash",  
+        "gemini-3.5-flash-lite",  
+        "gemini-3.1-flash-lite",  
+    ],  
 )  
-  
 # --------------------------------------------------------------------------- #  
 # Judge models — score each agent's output 0-100 AFTER all stages run.  
 #   Every model in JUDGE_MODELS scores each candidate; any judge that returns  
