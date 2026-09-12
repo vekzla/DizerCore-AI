@@ -83,15 +83,15 @@ async def run_pipeline(job: Job) -> None:
                         "(tier=%s)...", job.id, tier)  
   
             # ---- All three agents work independently, at the same time. ----  
-            (or_out, or_model), (gq_out, gq_model), (gm_out, gm_model) = \  
-                await asyncio.gather(  
-                    _run_agent(openrouter_generate, or_on, gen_prompt, tier,  
-                               "[OpenRouter skipped]\n\n" + job.prompt),  
-                    _run_agent(groq_generate, gq_on, gen_prompt, tier,  
-                               "[Groq skipped]\n\n" + job.prompt),  
-                    _run_agent(gemini_generate, gm_on, gen_prompt, tier,  
-                               "[Gemini skipped]\n\n" + job.prompt),  
-                )  
+            results = await asyncio.gather(  
+                _run_agent(openrouter_generate, or_on, gen_prompt, tier,  
+                           "[OpenRouter skipped]\n\n" + job.prompt),  
+                _run_agent(groq_generate, gq_on, gen_prompt, tier,  
+                           "[Groq skipped]\n\n" + job.prompt),  
+                _run_agent(gemini_generate, gm_on, gen_prompt, tier,  
+                           "[Gemini skipped]\n\n" + job.prompt),  
+            )  
+            (or_out, or_model), (gq_out, gq_model), (gm_out, gm_model) = results
   
             # OpenRouter -> "generate" slot  
             job.steps["generate"] = or_out  
