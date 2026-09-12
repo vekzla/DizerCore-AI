@@ -44,17 +44,14 @@ MAX_SAFETYWALL_TRIES = 3        # cap for junk-retry loops
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))  
   
 # --------------------------------------------------------------------------- #  
-# Inkling — the SOLE confidence judge.  
-#   It reads each stage's output against the user's ORIGINAL request and scores  
-#   0-100. It is NEVER fed the other models' self-assessments — only the raw  
-#   request + that stage's output. It is also used as an OpenRouter *fallback*  
-#   generator, and because it is a reasoning model it must be called with  
-#   reasoning enabled (see OPENROUTER_REASONING_MODELS below).  
+# Inkling — the sole confidence JUDGE (OpenRouter, reasoning enabled).  
+#   It reads each AI's output against the user's original request and scores it  
+#   0-100. The three generator AIs do NOT self-score. Inkling is also used as a  
+#   generation FALLBACK slug in each OpenRouter tier.  
 # --------------------------------------------------------------------------- #  
 INKLING_MODEL = os.environ.get("INKLING_MODEL", "thinkingmachines/inkling-small:free")  
-  
-# OpenRouter slugs that must be sent {"reasoning": {"enabled": True}}.  
-OPENROUTER_REASONING_MODELS = {INKLING_MODEL}  
+# OpenRouter models that must be called with the reasoning flag enabled.  
+REASONING_MODELS = {INKLING_MODEL}  
   
 # --------------------------------------------------------------------------- #  
 # Complexity tiers  
@@ -94,7 +91,7 @@ def _tier_map(var: str, light: list, normal: list, heavy: list) -> dict:
   
 # NOTE: verify each slug is live on the provider's models page. A wrong/retired  
 # slug just errors and the safetywall rotates to the next one in the list.  
-# Inkling is appended to every OpenRouter tier as the LAST-resort fallback.  
+# Inkling is appended to every OpenRouter tier as a last-resort fallback.  
 OPENROUTER_MODELS_BY_TIER = _tier_map(  
     "OPENROUTER_MODEL",  
     light=["google/gemma-4-31b-it:free", INKLING_MODEL],  
