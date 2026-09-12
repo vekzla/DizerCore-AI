@@ -1,85 +1,26 @@
 # auth.py  
-# DizercoreAI — user + session store (SQLite, stdlib PBKDF2) and auth helpers.  
-import hashlib  
-import hmac  
-import secrets  
-import sqlite3  
-import time  
-  
+# DizercoreAI — auth helpers (cookie-session) and auth-page HTML.  
+#  
+# The user + session STORE (SQLite/PBKDF2) lives in db.py. This module used to  
+# carry its own duplicate copies of those functions; that duplication is removed  
+# and they are re-exported from db.py so there is a single source of truth and  
+# the two can never drift out of sync.  
 from fastapi import HTTPException, Request  
   
 import runtime  
-from config import USERS_DB, SESSIONS_DB  
+# Re-export the store functions from db.py (single source of truth). Callers that  
+# previously imported these from auth continue to work unchanged.  
+from db import (  # noqa: F401  (re-exported for backward compatibility)  
+    init_users_db,  
+    create_user,  
+    verify_user,  
+    init_sessions_db,  
+    load_sessions,  
+    save_session,  
+    delete_session,  
+)  
   
 COOKIE_NAME = "dizer_session"  
-  
-  
-# --------------------------------------------------------------------------- #  
-# User store (SQLite + PBKDF2 salted hashing, stdlib only)  
-# --------------------------------------------------------------------------- #  
-def init_users_db() -> None:  
-    with sqlite3.connect(USERS_DB) as c:  
-        c.execute("""CREATE TABLE IF NOT EXISTS users (  
-            username TEXT PRIMARY KEY,  
-            salt TEXT NOT NULL,  
-            pwhash TEXT NOT NULL,  
-            created_at REAL NOT NULL)""")  
-  
-  
-def _hash_pw(password: str, salt: bytes) -> str:  
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000).hex()  
-  
-  
-def create_user(username: str, password: str) -> None:  
-    salt = secrets.token_bytes(16)  
-    pwhash = _hash_pw(password, salt)  
-    try:  
-        with sqlite3.connect(USERS_DB) as c:  
-            c.execute("INSERT INTO users VALUES (?,?,?,?)",  
-                      (username, salt.hex(), pwhash, time.time()))  
-    except sqlite3.IntegrityError:  
-        raise ValueError("Username already exists.")  
-  
-  
-def verify_user(username: str, password: str) -> bool:  
-    with sqlite3.connect(USERS_DB) as c:  
-        row = c.execute("SELECT salt, pwhash FROM users WHERE username=?",  
-                        (username,)).fetchone()  
-    if not row:  
-        return False  
-    salt_hex, pwhash = row  
-    candidate = _hash_pw(password, bytes.fromhex(salt_hex))  
-    return hmac.compare_digest(candidate, pwhash)  
-  
-  
-# --------------------------------------------------------------------------- #  
-# Session store (SQLite so logins survive service restarts)  
-# --------------------------------------------------------------------------- #  
-def init_sessions_db() -> None:  
-    with sqlite3.connect(SESSIONS_DB) as c:  
-        c.execute("""CREATE TABLE IF NOT EXISTS sessions (  
-            token TEXT PRIMARY KEY,  
-            username TEXT NOT NULL,  
-            created_at REAL NOT NULL)""")  
-  
-  
-def load_sessions() -> dict:  
-    out: dict = {}  
-    with sqlite3.connect(SESSIONS_DB) as c:  
-        for token, username in c.execute("SELECT token, username FROM sessions"):  
-            out[token] = username  
-    return out  
-  
-  
-def save_session(token: str, username: str) -> None:  
-    with sqlite3.connect(SESSIONS_DB) as c:  
-        c.execute("INSERT OR REPLACE INTO sessions VALUES (?,?,?)",  
-                  (token, username, time.time()))  
-  
-  
-def delete_session(token: str) -> None:  
-    with sqlite3.connect(SESSIONS_DB) as c:  
-        c.execute("DELETE FROM sessions WHERE token=?", (token,))  
   
   
 # --------------------------------------------------------------------------- #  
