@@ -131,9 +131,9 @@ async function poll(){
     document.getElementById('generate').textContent=j.steps.generate||'';  
     document.getElementById('verify').textContent=j.steps.verify||'';  
     document.getElementById('final_out').textContent=j.steps.final||'';  
-    document.getElementById('generate_meta').textContent=meta(j.steps.generate_model, j.steps.generate_confidence);  
-    document.getElementById('verify_meta').textContent=meta(j.steps.verify_model, j.steps.verify_confidence);  
-    document.getElementById('final_meta').textContent=meta(j.steps.final_model, j.steps.final_confidence);  
+    document.getElementById('generate_meta').textContent=meta(j.steps.generate_model, j.steps.generate_conf);  
+    document.getElementById('verify_meta').textContent=meta(j.steps.verify_model, j.steps.verify_conf);  
+    document.getElementById('final_meta').textContent=meta(j.steps.final_model, j.steps.final_conf);  
   }  
   if(['done','failed','cancelled'].includes(j.state)){ clearInterval(timer); loadJobs(); }  
 }  
