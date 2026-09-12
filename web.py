@@ -36,9 +36,11 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   .fitem .x { color:#f87171; cursor:pointer; margin-left:6px; font-weight:bold; }  
   #complexity_val { color:#38bdf8; font-weight:bold; }  
   #version { font-size:11px; color:#64748b; margin-top:2px; }  
-  #summary_box { border:1px solid #38bdf8; border-radius:6px; padding:12px;  
-                 margin-top:10px; background:#0b2233; }  
+  #summary_box { border:1px solid #334155; border-radius:6px; padding:12px;  
+                 margin-top:10px; background:#1e293b; }  
   #summary_box h3 { margin-top:0; }  
+  .spin { color:#38bdf8; font-size:13px; font-weight:normal; margin-left:8px;  
+          font-family:monospace; }  
 </style></head>  
 <body>  
 <div id="left">  
@@ -62,29 +64,33 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
     </label>  
   </div>  
   <div>  
-    <label><input type="checkbox" id="openrouter" checked> OpenRouter (generate code)</label>  
-    <label><input type="checkbox" id="groq" checked> Groq (verify vs input)</label>  
-    <label><input type="checkbox" id="gemini" checked> Gemini (final cleaned code)</label>  
-    <label><input type="checkbox" id="inkling" checked> Judge pool (scores each AI vs your input, highest average wins)</label>  
+    <label><input type="checkbox" id="openrouter" checked> OpenRouter</label>  
+    <label><input type="checkbox" id="groq" checked> Groq</label>  
+    <label><input type="checkbox" id="gemini" checked> Gemini</label>  
+    <label><input type="checkbox" id="inkling" checked> Judge Pool</label>  
   </div>  
   <button onclick="run()">Run</button>  
   <button class="stop" onclick="stop()">Stop</button>  
   <button class="clear" onclick="clearChat()">Clear chat</button>  
   <p id="state"></p>  
-  <h3>1. OpenRouter generated code</h3>  
+  <h3>OpenRouter<span class="spin" id="generate_spin"></span></h3>  
   <div class="meta" id="generate_meta"></div><pre id="generate"></pre>  
-  <h3>2. Groq verification</h3>  
+  <h3>Groq<span class="spin" id="verify_spin"></span></h3>  
   <div class="meta" id="verify_meta"></div><pre id="verify"></pre>  
-  <h3>3. Gemini final cleaned / optimised code</h3>  
+  <h3>Gemini<span class="spin" id="final_spin"></span></h3>  
   <div class="meta" id="final_meta"></div><pre id="final_out"></pre>  
   <div id="summary_box">  
-    <h3>Judge pool — best output</h3>  
+    <h3>Judge Pool — best output<span class="spin" id="summary_spin"></span></h3>  
     <div class="meta" id="summary_meta"></div>  
     <pre id="summary"></pre>  
   </div>  
 </div>  
 <script>  
 let jobId=null, timer=null, lastUpdated=0, chosen=[];  
+// Which stages are currently "working" (drives the animated spinner).  
+let spinning={generate:false, verify:false, final:false, summary:false};  
+let spinFrame=0;  
+const SPIN_FRAMES=['----','-·--','--·-','---·','·---','--·--'];  
 const drop=document.getElementById('drop'), fileInput=document.getElementById('file');  
 drop.onclick=()=>fileInput.click();  
 ['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('hover');}));  
@@ -103,12 +109,30 @@ function renderFiles(){
     s.appendChild(x); box.appendChild(s);  
   });  
 }  
+// Animate a "working ----" indicator next to any stage marked working.  
+function animateSpinners(){  
+  spinFrame=(spinFrame+1)%SPIN_FRAMES.length;  
+  const frame=SPIN_FRAMES[spinFrame];  
+  for(const key of ['generate','verify','final','summary']){  
+    const el=document.getElementById(key+'_spin');  
+    if(!el) continue;  
+    el.textContent = spinning[key] ? ('working '+frame) : '';  
+  }  
+}  
+setInterval(animateSpinners, 300);  
+function clearSpinners(){  
+  spinning={generate:false, verify:false, final:false, summary:false};  
+  for(const key of ['generate','verify','final','summary']){  
+    const el=document.getElementById(key+'_spin'); if(el) el.textContent='';  
+  }  
+}  
 function clearChat(){  
   document.getElementById('prompt').value='';  
   chosen=[]; renderFiles();  
   document.getElementById('state').textContent='';  
   for(const id of ['generate','verify','final_out','summary']) document.getElementById(id).textContent='';  
   for(const id of ['generate_meta','verify_meta','final_meta','summary_meta']) document.getElementById(id).textContent='';  
+  clearSpinners();  
   jobId=null; if(timer) clearInterval(timer);  
 }  
 async function run(){  
@@ -146,14 +170,21 @@ async function poll(){
     document.getElementById('final_meta').textContent=meta(j.steps.final_model, j.steps.final_conf);  
     document.getElementById('summary').textContent=j.steps.summary||'';  
     document.getElementById('summary_meta').textContent=meta('', j.steps.summary_conf);  
+    // Drive the "working" spinners from the live per-stage status flags.  
+    spinning.generate = (j.steps.generate_status==='working');  
+    spinning.verify   = (j.steps.verify_status==='working');  
+    spinning.final    = (j.steps.final_status==='working');  
+    spinning.summary  = (j.steps.summary_status==='working');  
   }  
-  if(['done','failed','cancelled'].includes(j.state)){ clearInterval(timer); loadJobs(); }  
+  if(['done','failed','cancelled'].includes(j.state)){  
+    clearInterval(timer); clearSpinners(); loadJobs();  
+  }  
 }  
 async function stop(){ if(jobId) await fetch('/stop/'+jobId,{method:'POST'}); }  
 async function delJob(id, ev){  
   ev.stopPropagation();  
   await fetch('/jobs/'+id,{method:'DELETE'});  
-  if(jobId===id){ jobId=null; if(timer) clearInterval(timer); }  
+  if(jobId===id){ jobId=null; if(timer) clearInterval(timer); clearSpinners(); }  
   loadJobs();  
 }  
 async function loadJobs(){  
