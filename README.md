@@ -56,8 +56,7 @@ The panel shows **which model was used** and a **per-stage confidence %** (the a
 
 ## Install (Raspberry Pi 5)  
 
-One-shot installer (clones the repo, mounts/points at the SSD, prompts for API  
-keys, installs a systemd service, prints the URL):  
+One-shot installer (clones the repo, mounts/points at the SSD, prompts for API keys, installs a systemd service, prints the URL):  
 
 ```bash  
 curl -fsSL https://raw.githubusercontent.com/vekzla/DizerCore-AI/main/install.sh | tr -d '\r' | bash
@@ -69,15 +68,13 @@ to reboot and re-run once.
 
 ## Configuration  
   
-All settings are environment variables (see `.env.example`). The installer writes  
-your API keys and data directory to:  
+All settings are environment variables (see `.env.example`). The installer writes your API keys and data directory to:  
   
     /mnt/dizerdata/dizercore/dizercore.env  
   
 ## Override models or tiers  
   
-Add the matching **singular** `*_MODEL_LIGHT`, `*_MODEL_NORMAL`, or  
-`*_MODEL_HEAVY` line to that env file, using comma-separated slug lists:  
+Add the matching **singular** `*_MODEL_LIGHT`, `*_MODEL_NORMAL`, or `*_MODEL_HEAVY` line to that env file, using comma-separated slug lists:  
   
     OPENROUTER_MODEL_HEAVY=slug-a,slug-b  
   
