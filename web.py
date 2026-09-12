@@ -36,6 +36,9 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   .fitem .x { color:#f87171; cursor:pointer; margin-left:6px; font-weight:bold; }  
   #complexity_val { color:#38bdf8; font-weight:bold; }  
   #version { font-size:11px; color:#64748b; margin-top:2px; }  
+  #summary_box { border:1px solid #38bdf8; border-radius:6px; padding:12px;  
+                 margin-top:10px; background:#0b2233; }  
+  #summary_box h3 { margin-top:0; }  
 </style></head>  
 <body>  
 <div id="left">  
@@ -62,6 +65,7 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
     <label><input type="checkbox" id="openrouter" checked> OpenRouter (generate code)</label>  
     <label><input type="checkbox" id="groq" checked> Groq (verify vs input)</label>  
     <label><input type="checkbox" id="gemini" checked> Gemini (final cleaned code)</label>  
+    <label><input type="checkbox" id="inkling" checked> Inkling judge (scores each AI vs your input)</label>  
   </div>  
   <button onclick="run()">Run</button>  
   <button class="stop" onclick="stop()">Stop</button>  
@@ -73,6 +77,11 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   <div class="meta" id="verify_meta"></div><pre id="verify"></pre>  
   <h3>3. Gemini final cleaned / optimised code</h3>  
   <div class="meta" id="final_meta"></div><pre id="final_out"></pre>  
+  <div id="summary_box">  
+    <h3>Inkling judge — best output</h3>  
+    <div class="meta" id="summary_meta"></div>  
+    <pre id="summary"></pre>  
+  </div>  
 </div>  
 <script>  
 let jobId=null, timer=null, lastUpdated=0, chosen=[];  
@@ -98,8 +107,8 @@ function clearChat(){
   document.getElementById('prompt').value='';  
   chosen=[]; renderFiles();  
   document.getElementById('state').textContent='';  
-  for(const id of ['generate','verify','final_out']) document.getElementById(id).textContent='';  
-  for(const id of ['generate_meta','verify_meta','final_meta']) document.getElementById(id).textContent='';  
+  for(const id of ['generate','verify','final_out','summary']) document.getElementById(id).textContent='';  
+  for(const id of ['generate_meta','verify_meta','final_meta','summary_meta']) document.getElementById(id).textContent='';  
   jobId=null; if(timer) clearInterval(timer);  
 }  
 async function run(){  
@@ -109,6 +118,7 @@ async function run(){
   body.append('openrouter', document.getElementById('openrouter').checked?'on':'off');  
   body.append('groq', document.getElementById('groq').checked?'on':'off');  
   body.append('gemini', document.getElementById('gemini').checked?'on':'off');  
+  body.append('inkling', document.getElementById('inkling').checked?'on':'off');  
   for(const f of chosen) body.append('files', f);  
   const r=await fetch('/run',{method:'POST',body});  
   if(!r.ok){ document.getElementById('state').textContent='Error: '+(await r.text()); return; }  
@@ -134,6 +144,8 @@ async function poll(){
     document.getElementById('generate_meta').textContent=meta(j.steps.generate_model, j.steps.generate_conf);  
     document.getElementById('verify_meta').textContent=meta(j.steps.verify_model, j.steps.verify_conf);  
     document.getElementById('final_meta').textContent=meta(j.steps.final_model, j.steps.final_conf);  
+    document.getElementById('summary').textContent=j.steps.summary||'';  
+    document.getElementById('summary_meta').textContent=meta('', j.steps.summary_conf);  
   }  
   if(['done','failed','cancelled'].includes(j.state)){ clearInterval(timer); loadJobs(); }  
 }  
