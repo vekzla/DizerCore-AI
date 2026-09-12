@@ -46,7 +46,12 @@ MAX_SAFETYWALL_TRIES = int(os.environ.get("MAX_SAFETYWALL_TRIES", "8"))
 # Seconds inserted before EVERY outbound model call so bursts of requests do  
 # not trip the free-tier per-minute limits. Override via the env var.  
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))  
-  
+
+# Max output tokens per generation call. 1500 truncated large files (e.g. full  
+# SQL schemas), so raise it. Keep <= ~6000 because Groq's gpt-oss models are  
+# capped at 8K tokens/minute (prompt + output) and will 429 above that.  
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))
+
 # --------------------------------------------------------------------------- #  
 # Inkling — kept for backward compatibility only.  
 #   Historically the sole confidence judge. Judging is now performed by the  
