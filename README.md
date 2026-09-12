@@ -102,8 +102,7 @@ Edit the env file, then restart the service:
 
     - No HTTPS by default (LAN use). Front with nginx/Caddy for TLS.
     - Data (SQLite DBs, uploads) lives on the SSD under DIZER_DATA_DIR, keeping the microSD free.
-    - Free-tier caps still apply per provider/model/day; when one is exhausted, untick it or bump the tier to a 
-      different slug. 
+    - Free-tier caps still apply per provider/model/day; when one is exhausted, untick it or bump the tier to a different slug. 
     - The safetywall only retries junk, not 429s.
     - A wrong/retired model slug is silently skipped and wastes a rotation slot verify slugs on each provider's models page. 
     - Attached images are recorded as a placeholder note in the prompt (the pipeline is text/code-oriented), not analysed as vision input.
