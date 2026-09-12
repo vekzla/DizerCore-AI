@@ -1,10 +1,15 @@
 # providers.py  
-# DizercoreAI — provider integrations (OpenRouter, Groq, Gemini).  
+# DizercoreAI — provider integrations (OpenRouter, Groq, Gemini) + Inkling judge.  
 # Tier-aware calls rotate model slugs (light/normal/heavy). A safetywall  
 # re-checks each output and retries on junk, rotating to the next slug.  
 # RATE_LIMIT_DELAY is awaited before every outbound call to avoid burst caps.  
 # Shared clients/keys are read from runtime.* (set at startup) — NOT imported  
 # from config as an instance, which avoids the import-time ImportError.  
+#  
+# Confidence: there is ONE judge — Inkling (thinkingmachines/inkling-small:free)  
+# via OpenRouter with reasoning enabled. The three generator providers do NOT  
+# self-score. judge_confidence() reads a stage's output against the user's  
+# original request and returns a 0-100 integer string ("" on any failure).  
 import asyncio  
 import logging  
   
@@ -17,9 +22,11 @@ from config import (
     OPENROUTER_MODELS_BY_TIER,  
     GROQ_MODELS_BY_TIER,  
     GEMINI_MODELS_BY_TIER,  
+    INKLING_MODEL,  
+    OPENROUTER_REASONING_MODELS,  
 )  
   
-logger = logging.getLogger("dizercore")  
+logger = logging.getLogger("DizerCore")  
   
   
 # ---------------------------------------------------------------------------  
@@ -56,6 +63,15 @@ def is_unusable(text: str) -> bool:
 # ---------------------------------------------------------------------------  
 async def _openrouter_once(prompt: str, model: str, max_tokens: int) -> str:  
     await asyncio.sleep(RATE_LIMIT_DELAY)  
+    body = {  
+        "model": model,  
+        "messages": [{"role": "user", "content": prompt}],  
+        "max_tokens": max_tokens,  
+    }  
+    # Reasoning models (e.g. Inkling) must be told to reason; we still read only  
+    # the final message.content, discarding the reasoning trace.  
+    if model in OPENROUTER_REASONING_MODELS:  
+        body["reasoning"] = {"enabled": True}  
     r = await runtime.http_client.post(  
         "https://openrouter.ai/api/v1/chat/completions",  
         headers={  
@@ -63,9 +79,7 @@ async def _openrouter_once(prompt: str, model: str, max_tokens: int) -> str:
             "HTTP-Referer": "http://192.168.1.6:8000",  
             "X-Title": "DizerCore.AI",  
         },  
-        json={"model": model,  
-              "messages": [{"role": "user", "content": prompt}],  
-              "max_tokens": max_tokens},  
+        json=body,  
     )  
     if r.status_code in (401, 402, 403):  
         raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:300]}")  
@@ -141,56 +155,30 @@ async def gemini_generate(prompt, tier="normal", max_tokens=1500):
   
   
 # ---------------------------------------------------------------------------  
-# Per-stage confidence (0-100).  
-# Each stage is scored by its OWN provider so a single provider being  
-# rate-limited never blanks every score. A bigger token budget is used than  
-# before (8 was too small — reasoning models spent it all before emitting the  
-# number, so the score always came back empty). Swallows all errors so it  
-# never fails a job.  
+# Inkling — the ONE confidence judge (0-100).  
+# It reads a stage's output against the user's ORIGINAL request and returns an  
+# integer. Reasoning is enabled so it thinks before answering; we parse only the  
+# integer out of the final content. All errors are swallowed so a scoring  
+# failure never fails the job (the % just renders blank).  
 # ---------------------------------------------------------------------------  
 _CONF_PROMPT = (  
-    "Rate from 0 to 100 how well the CODE satisfies the REQUEST. "  
-    "Reply with ONLY the integer, nothing else.\n\n"  
+    "You are an impartial judge. Rate from 0 to 100 how well the CODE satisfies "  
+    "the REQUEST. Consider correctness, completeness and whether it actually "  
+    "does what was asked. Reply with ONLY the integer, nothing else.\n\n"  
     "REQUEST:\n{req}\n\nCODE:\n{code}"  
 )  
 _CONF_MAX_TOKENS = 512  
   
   
-def _first_slug(table: dict) -> str:  
-    """First available slug across tiers, preferring the cheapest (light)."""  
-    for tier in ("light", "normal", "heavy"):  
-        slugs = table.get(tier)  
-        if slugs:  
-            return slugs[0]  
-    return ""  
-  
-  
-async def _confidence(call_once, model: str, request: str, code: str) -> str:  
-    if not model:  
+async def judge_confidence(request: str, code: str) -> str:  
+    """Inkling scores `code` against `request`. Returns a 0-100 string or ""."""  
+    if not code or not code.strip():  
         return ""  
     try:  
-        out = await call_once(  
+        out = await _openrouter_once(  
             _CONF_PROMPT.format(req=request, code=code),  
-            model, _CONF_MAX_TOKENS)  
+            INKLING_MODEL, _CONF_MAX_TOKENS)  
         digits = "".join(ch for ch in out if ch.isdigit())[:3]  
         return digits if digits else ""  
     except Exception:                                # noqa: BLE001  
-        return ""  
-  
-  
-async def openrouter_confidence(request: str, code: str) -> str:  
-    return await _confidence(_openrouter_once,  
-                             _first_slug(OPENROUTER_MODELS_BY_TIER),  
-                             request, code)  
-  
-  
-async def groq_confidence(request: str, code: str) -> str:  
-    return await _confidence(_groq_once,  
-                             _first_slug(GROQ_MODELS_BY_TIER),  
-                             request, code)  
-  
-  
-async def gemini_confidence(request: str, code: str) -> str:  
-    return await _confidence(_gemini_once,  
-                             _first_slug(GEMINI_MODELS_BY_TIER),  
-                             request, code)
+        return ""
