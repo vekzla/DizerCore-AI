@@ -50,6 +50,8 @@ async def run_pipeline(job: Job) -> None:
             if job.stages.get("openrouter", True):  
                 logger.info("[Job %s] STAGE 1/3 OpenRouter generating (tier=%s)...",  
                             job.id, tier)  
+                job.steps["generate_status"] = "working"  
+                job.touch(); save_job(job)  
                 gen_prompt = (  
                     "Write complete, runnable code implementing this request. "  
                     "Return ONLY code, minimal comments. Do NOT ask for the code — "  
@@ -60,6 +62,7 @@ async def run_pipeline(job: Job) -> None:
                 code = "[OpenRouter skipped — using your raw input]\n\n" + job.prompt  
                 job.steps["generate_model"] = "(skipped)"  
             job.steps["generate"] = code  
+            job.steps["generate_status"] = "done"  
             job.touch(); save_job(job)  
   
             # ---- Stage 2: Groq verifies the code. ----  
@@ -67,6 +70,8 @@ async def run_pipeline(job: Job) -> None:
             if job.stages.get("groq", True):  
                 logger.info("[Job %s] STAGE 2/3 Groq verifying (tier=%s)...",  
                             job.id, tier)  
+                job.steps["verify_status"] = "working"  
+                job.touch(); save_job(job)  
                 verify_prompt = (  
                     "Verify this code against the original request. Fix any issues, "  
                     "then return the improved code and a short note of what you changed. "  
@@ -78,6 +83,7 @@ async def run_pipeline(job: Job) -> None:
                 verify = "[Groq skipped — forwarding OpenRouter's code]\n\n" + code  
                 job.steps["verify_model"] = "(skipped)"  
             job.steps["verify"] = verify  
+            job.steps["verify_status"] = "done"  
             job.touch(); save_job(job)  
   
             # ---- Stage 3: Gemini returns final cleaned code. ----  
@@ -85,6 +91,8 @@ async def run_pipeline(job: Job) -> None:
             if job.stages.get("gemini", True):  
                 logger.info("[Job %s] STAGE 3/3 Gemini final cleanup (tier=%s)...",  
                             job.id, tier)  
+                job.steps["final_status"] = "working"  
+                job.touch(); save_job(job)  
                 final_prompt = (  
                     "Verify this code satisfies the original request, then return the "  
                     "FINAL cleaned, optimised and refactored code. Return the complete "  
@@ -96,11 +104,14 @@ async def run_pipeline(job: Job) -> None:
                 final = "[Gemini skipped — showing Groq's verified output]\n\n" + verify  
                 job.steps["final_model"] = "(skipped)"  
             job.steps["final"] = final  
+            job.steps["final_status"] = "done"  
             job.touch(); save_job(job)  
   
             # ---- Judge pool: averaged score for every stage. ----  
             if job.stages.get("inkling", True):  
                 logger.info("[Job %s] Judge pool scoring each stage...", job.id)  
+                job.steps["summary_status"] = "working"  
+                job.touch(); save_job(job)  
                 candidates = [  
                     ("OpenRouter", "generate", code, job.stages.get("openrouter", True)),  
                     ("Groq",       "verify",   verify, job.stages.get("groq", True)),  
@@ -134,6 +145,7 @@ async def run_pipeline(job: Job) -> None:
                 else:  
                     job.steps["summary"] = "The judge pool could not score any stage."  
                     job.steps["summary_conf"] = ""  
+                job.steps["summary_status"] = "done"  
                 job.touch(); save_job(job)  
   
             job.state = State.DONE  
