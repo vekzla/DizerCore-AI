@@ -37,21 +37,24 @@ MAX_FILE_BYTES = 5_000_000
 MAX_TOTAL_FILE_BYTES = 20_000_000  
 MAX_CONCURRENT_JOBS = 2  
 MAX_PIPELINE_RETRIES = 2        # times a stage re-interrogates itself on junk  
-MAX_SAFETYWALL_TRIES = 3        # cap for junk-retry loops  
+  
+# Cap for junk-retry rotation loops. Must be >= the length of the longest tier  
+# list below, otherwise fallback slugs past this index are never reached.  
+# Env-overridable so ops can tune it without a code change.  
+MAX_SAFETYWALL_TRIES = int(os.environ.get("MAX_SAFETYWALL_TRIES", "8"))  
   
 # Seconds inserted before EVERY outbound model call so bursts of requests do  
 # not trip the free-tier per-minute limits. Override via the env var.  
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))  
   
 # --------------------------------------------------------------------------- #  
-# Inkling — the sole confidence JUDGE (OpenRouter, reasoning enabled).  
-#   It reads each AI's output against the user's original request and scores it  
-#   0-100. The three generator AIs do NOT self-score. Inkling is also used as a  
-#   generation FALLBACK slug in each OpenRouter tier.  
+# Inkling — kept for backward compatibility only.  
+#   Historically the sole confidence judge. Judging is now performed by the  
+#   JUDGE_MODELS pool (see below); INKLING_MODEL remains defined so any legacy  
+#   env/config references still resolve.  
 # --------------------------------------------------------------------------- #  
 INKLING_MODEL = os.environ.get("INKLING_MODEL", "thinkingmachines/inkling-small:free")  
-# OpenRouter models that must be called with the reasoning flag enabled.  
-REASONING_MODELS = {INKLING_MODEL}  
+  
   
 # --------------------------------------------------------------------------- #  
 # Complexity tiers  
@@ -91,12 +94,30 @@ def _tier_map(var: str, light: list, normal: list, heavy: list) -> dict:
   
 # NOTE: verify each slug is live on the provider's models page. A wrong/retired  
 # slug just errors and the safetywall rotates to the next one in the list.  
-# Inkling is appended to every OpenRouter tier as a last-resort fallback.  
+# Each tier holds MULTIPLE coding slugs so a failed/junk model rotates to the  
+# next fallback within the same tier. Complexity 1-2 -> light, 3 -> normal,  
+# 4-5 -> heavy.  
 OPENROUTER_MODELS_BY_TIER = _tier_map(  
     "OPENROUTER_MODEL",  
-    light=["google/gemma-4-31b-it:free", INKLING_MODEL],  
-    normal=["poolside/laguna-s-2.1:free", INKLING_MODEL],  
-    heavy=["nex-agi/nex-n2.5-pro:free", INKLING_MODEL],  
+    light=[  
+        "liquid/lfm-2.5-2.6b:free",  
+        "nvidia/nemotron-3.5-lightning:free",  
+        "poolside/laguna-xs-2.1:free",  
+        "google/gemma-4-26b-a4b-it:free",  
+        "thinkingmachines/inkling-small:free",  
+        "nex-agi/nex-n2.5-mini:free",  
+        "cohere/north-mini-code:free",  
+    ],  
+    normal=[  
+        "poolside/laguna-s-2.1:free",  
+        "google/gemma-4-31b-it:free",  
+        "thinkingmachines/inkling:free",  
+        "nex-agi/nex-n2.5-pro:free",  
+    ],  
+    heavy=[  
+        "nvidia/nemotron-3-super-120b-a12b:free",  
+        "nvidia/nemotron-3-ultra-550b-a55b:free",  
+    ],  
 )  
 GROQ_MODELS_BY_TIER = _tier_map(  
     "GROQ_MODEL",  
@@ -110,6 +131,44 @@ GEMINI_MODELS_BY_TIER = _tier_map(
     normal=["gemini-3.6-flash"],  
     heavy=["gemini-3.6-flash"],  
 )  
+  
+# --------------------------------------------------------------------------- #  
+# Judge models — score each agent's output 0-100 AFTER all stages run.  
+#   Every model in JUDGE_MODELS scores each candidate; any judge that returns  
+#   non-numeric output (or errors) is DISCARDED and replaced by the next unused  
+#   slug from JUDGE_FALLBACK_MODELS. The surviving numeric scores are averaged,  
+#   and the agent (OpenRouter / Groq / Gemini) with the highest average wins.  
+#   Both lists are comma-separated env-overridable.  
+# --------------------------------------------------------------------------- #  
+def _list_from_env(var: str, default: list) -> list:  
+    raw = os.environ.get(var)  
+    if raw:  
+        return [s.strip() for s in raw.split(",") if s.strip()]  
+    return default  
+  
+  
+JUDGE_MODELS = _list_from_env(  
+    "JUDGE_MODELS",  
+    [  
+        "inclusionai/ling-3.0-flash-vl:free",  
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  
+        "nvidia/nemotron-3.5-content-safety:free",  
+    ],  
+)  
+JUDGE_FALLBACK_MODELS = _list_from_env("JUDGE_FALLBACK_MODELS", [])  
+  
+# --------------------------------------------------------------------------- #  
+# Reasoning flag — EVERY slug used anywhere (generation tiers + judges +  
+# legacy Inkling) is called with "reasoning": {"enabled": True}. Built  
+# programmatically so new slugs above are automatically included.  
+# --------------------------------------------------------------------------- #  
+REASONING_MODELS = set()  
+for _tier_list in OPENROUTER_MODELS_BY_TIER.values():  
+    REASONING_MODELS.update(_tier_list)  
+REASONING_MODELS.update(JUDGE_MODELS)  
+REASONING_MODELS.update(JUDGE_FALLBACK_MODELS)  
+REASONING_MODELS.add(INKLING_MODEL)  
+  
   
 # --------------------------------------------------------------------------- #  
 # Deflection / verdict detection  
