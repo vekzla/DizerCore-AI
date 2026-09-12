@@ -16,6 +16,7 @@ from google import genai
   
 import config  
 import db  
+import runtime  
 import providers  
 from routes import router  
   
@@ -35,12 +36,12 @@ if not logger.handlers:
   
   
 # ---------------------------------------------------------------------------  
-# Lifespan: build shared state and hand it to the modules that need it  
+# Lifespan: build shared state on runtime.* and hand it to every module  
 # ---------------------------------------------------------------------------  
 @asynccontextmanager  
 async def lifespan(app: FastAPI):  
     # Load + validate API keys (raises clearly if any are missing).  
-    config.config = config.Config.from_env()  
+    runtime.cfg = config.Config.from_env()  
   
     # Create the persistent DB tables (users / jobs / sessions).  
     db.init_users_db()  
@@ -48,22 +49,22 @@ async def lifespan(app: FastAPI):
     db.init_sessions_db()  
   
     # Restore history + live sessions from the SSD so they survive restarts.  
-    db.JOBS = db.load_jobs()  
-    db.SESSIONS = db.load_sessions()  
+    runtime.JOBS = db.load_jobs()  
+    runtime.SESSIONS = db.load_sessions()  
   
-    # Shared clients + concurrency guard, exposed on `providers` for the stage calls.  
-    providers.gemini_client = genai.Client(api_key=config.config.gemini_key)  
-    providers.http_client = httpx.AsyncClient(timeout=120)  
-    db.job_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_JOBS)  
+    # Shared clients + concurrency guard, all on runtime.* (providers reads these).  
+    runtime.gemini_client = genai.Client(api_key=runtime.cfg.gemini_key)  
+    runtime.http_client = httpx.AsyncClient(timeout=120)  
+    runtime.job_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_JOBS)  
   
     logger.info(  
         "DizerCore startup complete; data dir=%s; %d job(s), %d session(s) loaded.",  
-        config.DATA_DIR, len(db.JOBS), len(db.SESSIONS),  
+        config.DATA_DIR, len(runtime.JOBS), len(runtime.SESSIONS),  
     )  
     try:  
         yield  
     finally:  
-        await providers.http_client.aclose()  
+        await runtime.http_client.aclose()  
         logger.info("DizerCore shutdown; HTTP client closed.")  
   
   
@@ -82,7 +83,5 @@ app.include_router(router)
   
 if __name__ == "__main__":  
     import uvicorn  
-    # Pass the app object directly (module import string also works now that the  
-    # filename has no dots, but this keeps parity with the single-file version).  
     port = int(os.environ.get("PORT", "8000"))  
     uvicorn.run(app, host="0.0.0.0", port=port)
