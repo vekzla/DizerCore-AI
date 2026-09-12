@@ -17,8 +17,9 @@ from google.genai import types
   
 import runtime  
 from config import (  
-    RATE_LIMIT_DELAY,
-    MAX_OUTPUT_TOKENS,
+    RATE_LIMIT_DELAY,  
+    MAX_OUTPUT_TOKENS,  
+    GROQ_MAX_OUTPUT_TOKENS,  
     MAX_SAFETYWALL_TRIES,  
     OPENROUTER_MODELS_BY_TIER,  
     GROQ_MODELS_BY_TIER,  
@@ -141,7 +142,11 @@ async def openrouter_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKEN
                          prompt, max_tokens)  
   
   
-async def groq_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):  
+async def groq_generate(prompt, tier="normal", max_tokens=GROQ_MAX_OUTPUT_TOKENS):  
+    # Groq uses a SMALLER default cap than OpenRouter/Gemini: its gpt-oss / qwen  
+    # models share an 8K tokens/minute budget across prompt + output, so a big  
+    # prompt plus a 6000-token response 429/413s. GROQ_MAX_OUTPUT_TOKENS (~3000)  
+    # keeps prompt + output under 8K TPM.  
     return await _rotate(_groq_once,  
                          GROQ_MODELS_BY_TIER.get(tier, []),  
                          prompt, max_tokens)  
@@ -150,7 +155,7 @@ async def groq_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):
 async def gemini_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):  
     return await _rotate(_gemini_once,  
                          GEMINI_MODELS_BY_TIER.get(tier, []),  
-                         prompt, max_tokens)
+                         prompt, max_tokens)  
   
   
 # ---------------------------------------------------------------------------  
