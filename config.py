@@ -46,12 +46,19 @@ MAX_SAFETYWALL_TRIES = int(os.environ.get("MAX_SAFETYWALL_TRIES", "8"))
 # Seconds inserted before EVERY outbound model call so bursts of requests do  
 # not trip the free-tier per-minute limits. Override via the env var.  
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))  
-
+  
 # Max output tokens per generation call. 1500 truncated large files (e.g. full  
 # SQL schemas), so raise it. Keep <= ~6000 because Groq's gpt-oss models are  
 # capped at 8K tokens/minute (prompt + output) and will 429 above that.  
-MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))
-
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))  
+  
+# Groq gets its OWN, smaller output cap. Its gpt-oss / qwen models share an 8K  
+# tokens/MINUTE budget across prompt + output, so a large prompt plus a 6000-token  
+# response overshoots 8K and Groq returns 429/413. Keeping Groq's output at ~3000  
+# leaves room for a sizeable prompt while staying under 8K TPM. OpenRouter and  
+# Gemini are unaffected and keep the full MAX_OUTPUT_TOKENS. Env-overridable.  
+GROQ_MAX_OUTPUT_TOKENS = int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "3000"))  
+  
 # --------------------------------------------------------------------------- #  
 # Inkling — kept for backward compatibility only.  
 #   Historically the sole confidence judge. Judging is now performed by the  
@@ -124,38 +131,24 @@ OPENROUTER_MODELS_BY_TIER = _tier_map(
         "nvidia/nemotron-3-ultra-550b-a55b:free",  
     ],  
 )  
-
-# ---- Groq model rotation, per complexity tier -------------------------------  
-# All limits VERIFIED from the Groq console (Default Project):  
-#   openai/gpt-oss-20b   : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
-#   openai/gpt-oss-120b  : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
-#   qwen/qwen3.6-27b     : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
-#   qwen/qwen3.8-27b     : 30 RPM / 1,000 RPD / 8K TPM / 200K TPD  
-#   groq/compound        : 30 RPM /   250 RPD / 70K TPM / (no TPD cap)  
-#   groq/compound-mini   : 30 RPM /   250 RPD / 70K TPM / (no TPD cap)  
-# gpt-oss/qwen share an 8K TOKENS-PER-MINUTE cap (prompt + output), so large  
-# jobs 429/413 there; compound* has 70K TPM headroom but only 250 req/day, so  
-# it sits LAST as the big-payload fallback. Audio (orpheus/whisper) and the  
-# prompt-guard / safeguard safety classifiers are intentionally excluded.  
 GROQ_MODELS_BY_TIER = _tier_map(  
     "GROQ_MODEL",  
     light=[  
-        "openai/gpt-oss-20b",     # 1K RPD, 8K TPM  
-        "qwen/qwen3.6-27b",       # 1K RPD, 8K TPM  
-        "groq/compound-mini",     # 250 RPD, 70K TPM (big-payload fallback)  
+        "openai/gpt-oss-20b",  
+        "qwen/qwen3.6-27b",  
+        "groq/compound-mini",  
     ],  
     normal=[  
-        "openai/gpt-oss-120b",    # 1K RPD, 8K TPM  
-        "qwen/qwen3.8-27b",       # 1K RPD, 8K TPM  
-        "groq/compound",          # 250 RPD, 70K TPM (big-payload fallback)  
+        "openai/gpt-oss-120b",  
+        "qwen/qwen3.8-27b",  
+        "groq/compound",  
     ],  
     heavy=[  
-        "openai/gpt-oss-120b",    # 1K RPD, 8K TPM  
-        "qwen/qwen3.8-27b",       # 1K RPD, 8K TPM  
-        "groq/compound",          # 250 RPD, 70K TPM (big-payload fallback)  
+        "openai/gpt-oss-120b",  
+        "qwen/qwen3.8-27b",  
+        "groq/compound",  
     ],  
-)
-
+)  
 GEMINI_MODELS_BY_TIER = _tier_map(  
     "GEMINI_MODEL",  
     # Flash-Lite = 500 RPD / 15 RPM; full Flash = only 20 RPD / 5 RPM.  
