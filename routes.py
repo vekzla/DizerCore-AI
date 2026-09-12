@@ -1,7 +1,7 @@
 # routes.py  
 # DizercoreAI — FastAPI route handlers.  
 # Auth routes (/login, /register, /logout), app routes (/, /run, /jobs,  
-# DELETE /jobs/{id}, /status, /stop, /favicon.ico).  
+# DELETE /jobs/{id}, /status, /stop, /version, /favicon.ico).  
 # Wired to pipeline.run_pipeline and the per-job complexity (1-5) selector.  
 import asyncio  
 import secrets  
@@ -27,6 +27,7 @@ from auth import (
 )  
 from pipeline import run_pipeline  
 from web import DASHBOARD_HTML  
+from version import get_version  
   
 router = APIRouter()  
   
@@ -89,6 +90,11 @@ async def index(request: Request):
     if not SESSIONS.get(token or ""):  
         return RedirectResponse("/login", status_code=303)  
     return HTMLResponse(DASHBOARD_HTML)  
+  
+  
+@router.get("/version")  
+async def version():  
+    return JSONResponse({"version": get_version()})  
   
   
 @router.post("/run")  
