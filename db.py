@@ -1,6 +1,8 @@
 # db.py  
 # SQLite persistence for DizercoreAI: users, sessions, and jobs.  
 # Pure stdlib (sqlite3 + hashlib/hmac) — no external DB dependency.  
+# This is the SINGLE source of truth for the user/session store; auth.py  
+# re-exports these helpers rather than redefining them.  
 import hashlib  
 import hmac  
 import json  
@@ -93,22 +95,18 @@ class State(str, Enum):
   
   
 def _default_steps() -> dict:  
-    # Per stage we keep the text output plus which model produced it and a  
-    # 1-100 confidence score (scored by the Inkling judge, not the stage's own  
-    # model). Blank strings render as empty panels in the UI.  
-    # `summary` / `summary_conf` hold the Inkling judge's "best is X (NN%)" line.  
+    # Per stage we keep the text output, which model produced it, and a 0-100  
+    # confidence score. Scoring is done by the JUDGE_MODELS pool (each judge  
+    # scores the stage, non-numeric judges are dropped and replaced by  
+    # fallbacks, the survivors are averaged). `summary`/`summary_conf` hold the  
+    # "best is X" verdict for the highest-average stage. Blank strings render as  
+    # empty panels.  
     return {  
         "generate": "", "generate_model": "", "generate_conf": "",  
         "verify": "",   "verify_model": "",   "verify_conf": "",  
         "final": "",    "final_model": "",    "final_conf": "",  
         "summary": "",  "summary_conf": "",  
     }  
-  
-  
-def _default_stages() -> dict:  
-    # openrouter/groq/gemini are the three generator stages; inkling is the  
-    # sole confidence judge (checked on by default in the dashboard).  
-    return {"openrouter": True, "groq": True, "gemini": True, "inkling": True}  
   
   
 @dataclass  
@@ -120,7 +118,8 @@ class Job:
     state: str = State.QUEUED  
     error: str = ""  
     steps: dict = field(default_factory=_default_steps)  
-    stages: dict = field(default_factory=_default_stages)  
+    stages: dict = field(default_factory=lambda: {  
+        "openrouter": True, "groq": True, "gemini": True, "inkling": True})  
     created_at: float = field(default_factory=time.time)  
     updated_at: float = field(default_factory=time.time)  
   
@@ -159,11 +158,17 @@ def load_jobs() -> dict:
                 d["error"] = "Server restarted while job was running."  
             # Backfill new fields for jobs saved by an older version.  
             d.setdefault("complexity", 3)  
-            merged_steps = _default_steps()  
-            merged_steps.update(d.get("steps", {}))  
-            d["steps"] = merged_steps  
-            merged_stages = _default_stages()  
-            merged_stages.update(d.get("stages", {}))  
-            d["stages"] = merged_stages  
+            merged = _default_steps()  
+            merged.update(d.get("steps", {}))  
+            d["steps"] = merged  
+            stages = {"openrouter": True, "groq": True, "gemini": True, "inkling": True}  
+            stages.update(d.get("stages", {}))  
+            d["stages"] = stages  
+            # Drop any unknown keys so an older/newer schema can't break Job(**d).  
+            allowed = {  
+                "id", "owner", "prompt", "complexity", "state", "error",  
+                "steps", "stages", "created_at", "updated_at",  
+            }  
+            d = {k: v for k, v in d.items() if k in allowed}  
             out[jid] = Job(**d)  
     return out
