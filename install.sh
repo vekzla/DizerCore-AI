@@ -146,6 +146,24 @@ git clone --branch "$BRANCH" "$REPO" "$APP_DIR"
 ok "Stamping version"  
 ( cd "$APP_DIR" && git rev-parse --short HEAD > VERSION 2>/dev/null ) || echo "unknown" > "$APP_DIR/VERSION"  
   
+# ==================================================================  
+# 5.2. Confirm the clone is on the latest commit (informational only)  
+# ==================================================================  
+ok "Checking whether the install is on the latest commit"  
+# Full local SHA of what we just cloned, and the short SHA for display.  
+LOCAL_FULL="$( cd "$APP_DIR" && git rev-parse HEAD 2>/dev/null || echo "" )"  
+LOCAL_SHORT="$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown" )"  
+# Full remote SHA of BRANCH HEAD. Guarded so a network error never aborts install.  
+REMOTE_FULL="$( git ls-remote "$REPO" "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}' )" || true  
+  
+if [ -z "$REMOTE_FULL" ]; then  
+  warn "Could not reach GitHub to verify latest commit; skipping freshness check."  
+elif [ "$REMOTE_FULL" = "$LOCAL_FULL" ]; then  
+  ok "Installed commit ${LOCAL_SHORT} is the latest on ${BRANCH}."  
+else  
+  warn "Installed commit ${LOCAL_SHORT} is NOT the latest. Remote ${BRANCH} HEAD is ${REMOTE_FULL:0:7}. Re-run the installer to update."  
+fi  
+  
 # Confirm the entrypoint and logo made it through the clone.  
 [ -f "$APP_DIR/$ENTRYPOINT" ] || die "Entrypoint ${ENTRYPOINT} not found in repo; check the file name/case."  
 if [ ! -f "$APP_DIR/static/dizercore.png" ]; then  
@@ -208,7 +226,7 @@ ok "Installing systemd service"
   printf '\n'  
   printf '[Install]\n'  
   printf 'WantedBy=multi-user.target\n'  
-} | sudo tee "$SERVICE" >/dev/null
+} | sudo tee "$SERVICE" >/dev/null  
   
 sudo systemctl daemon-reload  
 sudo systemctl enable "$SERVICE_NAME"  
