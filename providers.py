@@ -143,14 +143,20 @@ async def gemini_generate(prompt, tier="normal", max_tokens=1500):
 # ---------------------------------------------------------------------------  
 # Per-stage confidence (0-100). Swallows all errors so it never fails a job.  
 # ---------------------------------------------------------------------------  
-async def confidence(call_once, model: str, request: str, code: str) -> str:  
+async def confidence(request: str, code: str) -> str:  
+    """Ask a light Groq model to rate 0-100 how well `code` meets `request`.  
+    Swallows all errors so it never fails a job."""  
+    models = (GROQ_MODELS_BY_TIER.get("light")  
+              or GROQ_MODELS_BY_TIER.get("normal") or [])  
+    if not models:  
+        return ""  
     try:  
-        out = await call_once(  
+        out = await _groq_once(  
             "Rate from 0 to 100 how well the CODE satisfies the REQUEST. "  
             "Reply with ONLY the integer.\n\nREQUEST:\n" + request +  
             "\n\nCODE:\n" + code,  
-            model, 8)  
+            models[0], 8)  
         digits = "".join(ch for ch in out if ch.isdigit())[:3]  
         return digits if digits else ""  
-    except Exception:                                # noqa: BLE001  
+    except Exception:  # noqa: BLE001  
         return ""
