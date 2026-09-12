@@ -35,10 +35,12 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
            border-radius:4px; padding:2px 6px; margin:2px; font-size:12px; }  
   .fitem .x { color:#f87171; cursor:pointer; margin-left:6px; font-weight:bold; }  
   #complexity_val { color:#38bdf8; font-weight:bold; }  
+  #version { font-size:11px; color:#64748b; margin-top:2px; }  
 </style></head>  
 <body>  
 <div id="left">  
   <div class="brand"><img src="/static/dizercore.png" alt="DizerCoreAI"><h2>DizerCoreAI</h2></div>  
+  <div id="version"></div>  
   <form method="post" action="/logout"><button>Log out</button></form>  
   <h3>History</h3>  
   <div id="jobs"></div>  
@@ -158,5 +160,7 @@ async function loadJobs(){
   }  
 }  
 loadJobs();  
+fetch('/version').then(r=>r.json())  
+  .then(v=>{document.getElementById('version').textContent='version '+v.version;});  
 </script>  
 </body></html>"""
