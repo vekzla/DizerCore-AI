@@ -19,10 +19,6 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
            border-radius:6px; cursor:pointer; margin-top:6px; }  
   button.stop { background:#b91c1c; }  
   button.clear { background:#475569; }  
-  .copybtn { background:#334155; color:#f8fafc; border:none; padding:3px 10px;  
-             border-radius:4px; cursor:pointer; font-size:12px; margin-left:10px;  
-             margin-top:0; vertical-align:middle; font-weight:normal; }  
-  .copybtn:hover { background:#475569; }  
   pre { background:#1e293b; padding:12px; border-radius:6px; white-space:pre-wrap;  
         word-wrap:break-word; }  
   .job { padding:8px; border:1px solid #334155; border-radius:6px; margin-bottom:6px;  
@@ -43,8 +39,15 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   #summary_box { border:1px solid #334155; border-radius:6px; padding:12px;  
                  margin-top:10px; background:#1e293b; }  
   #summary_box h3 { margin-top:0; }  
+  /* Every agent/judge heading is a fixed row: title + spinner on the left,  
+     the Copy button pinned to the right so it never moves when the <pre> grows. */  
+  .agent-head { display:flex; align-items:center; margin-bottom:0; }  
   .spin { color:#38bdf8; font-size:13px; font-weight:normal; margin-left:8px;  
           font-family:monospace; }  
+  .copybtn { margin-left:auto; background:#334155; color:#f8fafc; border:none;  
+             padding:3px 12px; border-radius:4px; cursor:pointer; font-size:12px;  
+             margin-top:0; }  
+  .copybtn:hover { background:#475569; }  
 </style></head>  
 <body>  
 <div id="left">  
@@ -77,18 +80,22 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   <button class="stop" onclick="stop()">Stop</button>  
   <button class="clear" onclick="clearChat()">Clear chat</button>  
   <p id="state"></p>  
-  <h3>OpenRouter<span class="spin" id="generate_spin"></span>  
-      <button class="copybtn" onclick="copyText('generate', this)">Copy</button></h3>  
+  
+  <h3 class="agent-head">OpenRouter<span class="spin" id="generate_spin"></span>  
+    <button class="copybtn" onclick="copyText('generate', this)">Copy</button></h3>  
   <div class="meta" id="generate_meta"></div><pre id="generate"></pre>  
-  <h3>Groq<span class="spin" id="verify_spin"></span>  
-      <button class="copybtn" onclick="copyText('verify', this)">Copy</button></h3>  
+  
+  <h3 class="agent-head">Groq<span class="spin" id="verify_spin"></span>  
+    <button class="copybtn" onclick="copyText('verify', this)">Copy</button></h3>  
   <div class="meta" id="verify_meta"></div><pre id="verify"></pre>  
-  <h3>Gemini<span class="spin" id="final_spin"></span>  
-      <button class="copybtn" onclick="copyText('final_out', this)">Copy</button></h3>  
+  
+  <h3 class="agent-head">Gemini<span class="spin" id="final_spin"></span>  
+    <button class="copybtn" onclick="copyText('final_out', this)">Copy</button></h3>  
   <div class="meta" id="final_meta"></div><pre id="final_out"></pre>  
+  
   <div id="summary_box">  
-    <h3>Judge Pool — best output<span class="spin" id="summary_spin"></span>  
-        <button class="copybtn" onclick="copyText('summary', this)">Copy</button></h3>  
+    <h3 class="agent-head">Judge Pool — best output<span class="spin" id="summary_spin"></span>  
+      <button class="copybtn" onclick="copyText('summary', this)">Copy</button></h3>  
     <div class="meta" id="summary_meta"></div>  
     <pre id="summary"></pre>  
   </div>  
@@ -117,27 +124,22 @@ function renderFiles(){
     s.appendChild(x); box.appendChild(s);  
   });  
 }  
-// Copy an agent box's text. Uses the async Clipboard API when available  
-// (https / localhost); falls back to execCommand for plain http on the LAN.  
+// Copy the given <pre>'s text to the clipboard, with brief button feedback.  
 function copyText(id, btn){  
   const el=document.getElementById(id);  
-  const text=el ? el.textContent : '';  
-  if(!text){ return; }  
-  const flash=()=>{ const old=btn.textContent; btn.textContent='Copied!';  
-                    setTimeout(()=>{ btn.textContent=old; }, 1200); };  
-  if(navigator.clipboard && window.isSecureContext){  
-    navigator.clipboard.writeText(text).then(flash).catch(()=>fallbackCopy(text, flash));  
+  const txt=el ? el.textContent : '';  
+  if(!txt){ const o=btn.textContent; btn.textContent='Nothing'; setTimeout(()=>btn.textContent=o,1000); return; }  
+  const done=()=>{ const o=btn.dataset.label||'Copy'; btn.textContent='Copied'; setTimeout(()=>btn.textContent=o,1200); };  
+  const fail=()=>{ btn.textContent='Failed'; setTimeout(()=>btn.textContent='Copy',1200); };  
+  if(navigator.clipboard && navigator.clipboard.writeText){  
+    navigator.clipboard.writeText(txt).then(done).catch(fail);  
   } else {  
-    fallbackCopy(text, flash);  
+    // Fallback for non-HTTPS / older browsers.  
+    const ta=document.createElement('textarea'); ta.value=txt;  
+    ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta);  
+    ta.select(); try{ document.execCommand('copy'); done(); }catch(e){ fail(); }  
+    document.body.removeChild(ta);  
   }  
-}  
-function fallbackCopy(text, flash){  
-  const ta=document.createElement('textarea');  
-  ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';  
-  document.body.appendChild(ta); ta.focus(); ta.select();  
-  try{ document.execCommand('copy'); flash(); }  
-  catch(e){ /* clipboard blocked; user can still select manually */ }  
-  finally{ document.body.removeChild(ta); }  
 }  
 // Animate a "working ----" indicator next to any stage marked working.  
 function animateSpinners(){  
