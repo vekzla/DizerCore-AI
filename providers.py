@@ -18,6 +18,8 @@ from google.genai import types
 import runtime  
 from config import (  
     RATE_LIMIT_DELAY,  
+    ROTATE_BACKOFF_DELAY,  
+    MAX_RETRY_AFTER,  
     MAX_OUTPUT_TOKENS,  
     GROQ_MAX_OUTPUT_TOKENS,  
     MAX_SAFETYWALL_TRIES,  
@@ -28,7 +30,7 @@ from config import (
     JUDGE_FALLBACK_MODELS,  
     REASONING_MODELS,  
     _is_unusable,  
-)  
+)
   
 logger = logging.getLogger("DizerCore")  
   
