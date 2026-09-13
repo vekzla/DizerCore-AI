@@ -47,6 +47,16 @@ MAX_SAFETYWALL_TRIES = int(os.environ.get("MAX_SAFETYWALL_TRIES", "8"))
 # not trip the free-tier per-minute limits. Override via the env var.  
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))  
   
+# Extra pause (seconds) before rotating to the NEXT model slug after a failure  
+# or junk output. This is ON TOP of RATE_LIMIT_DELAY and only fires on rotation,  
+# so a clean first-slug success has no added latency. Gives the free-tier  
+# account quota a moment to recover before the next attempt hits it again.  
+ROTATE_BACKOFF_DELAY = float(os.environ.get("ROTATE_BACKOFF_DELAY", "20"))  
+  
+# Hard cap (seconds) on how long we honor a 429 "Retry-After" header before  
+# giving up and rotating, so a single rate-limited slug can't hang a job.  
+MAX_RETRY_AFTER = float(os.environ.get("MAX_RETRY_AFTER", "60"))
+  
 # Max output tokens per generation call. 1500 truncated large files (e.g. full  
 # SQL schemas), so raise it. Keep <= ~6000 because Groq's gpt-oss models are  
 # capped at 8K tokens/minute (prompt + output) and will 429 above that.  
