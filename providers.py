@@ -6,10 +6,12 @@
 # Shared clients/keys are read from runtime.* (set at startup) — NOT imported  
 # from config as an instance, which avoids the import-time ImportError.  
 #  
-# Confidence is judged by the JUDGE_MODELS pool (judge_confidence): each judge  
-# reads a stage's output against the user's original request and scores it  
-# 0-100. Non-numeric judges are dropped and replaced by JUDGE_FALLBACK_MODELS.  
-# The surviving numeric scores are averaged. Generator AIs never self-score.  
+# Confidence is judged by the JUDGE_MODELS pool (judge_confidence): for ONE  
+# candidate the judges are tried IN ORDER (JUDGE_MODELS, then  
+# JUDGE_FALLBACK_MODELS) and the FIRST usable numeric score wins. A judge that  
+# errors or returns non-numeric output is dropped and the next slug is tried.  
+# Only one judge call is made per candidate in the normal case. Generator AIs  
+# never self-score.  
 import asyncio  
 import logging  
   
@@ -18,8 +20,6 @@ from google.genai import types
 import runtime  
 from config import (  
     RATE_LIMIT_DELAY,  
-    ROTATE_BACKOFF_DELAY,  
-    MAX_RETRY_AFTER,  
     MAX_OUTPUT_TOKENS,  
     GROQ_MAX_OUTPUT_TOKENS,  
     MAX_SAFETYWALL_TRIES,  
@@ -30,7 +30,7 @@ from config import (
     JUDGE_FALLBACK_MODELS,  
     REASONING_MODELS,  
     _is_unusable,  
-)
+)  
   
 logger = logging.getLogger("DizerCore")  
   
@@ -80,24 +80,11 @@ async def _openrouter_once(prompt: str, model: str, max_tokens: int) -> str:
         },  
         json=body,  
     )  
-    # On a 429 (rate limited), wait the server-requested Retry-After (capped)  
-    # so the account quota can recover, THEN raise so _rotate moves on.  
-    if r.status_code == 429:  
-        wait = MAX_RETRY_AFTER  
-        retry_after = r.headers.get("Retry-After")  
-        if retry_after:  
-            try:  
-                wait = min(float(retry_after), MAX_RETRY_AFTER)  
-            except (TypeError, ValueError):  
-                wait = MAX_RETRY_AFTER  
-        logger.warning("OpenRouter 429 for %s; waiting %.0fs before rotating.",  
-                       model, wait)  
-        await asyncio.sleep(wait)  
-        raise RuntimeError(f"OpenRouter 429 (rate limited): {r.text[:200]}")  
     if r.status_code in (401, 402, 403):  
         raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:300]}")  
     r.raise_for_status()  
-    return (r.json()["choices"][0]["message"].get("content") or "")
+    return (r.json()["choices"][0]["message"].get("content") or "")  
+  
   
 async def _groq_once(prompt: str, model: str, max_tokens: int) -> str:  
     await asyncio.sleep(RATE_LIMIT_DELAY)  
@@ -132,17 +119,13 @@ async def _gemini_once(prompt: str, model: str, max_tokens: int) -> str:
 # Tier-aware rotation with safetywall  
 # ---------------------------------------------------------------------------  
 async def _rotate(call_once, models: list, prompt: str, max_tokens: int):  
-    """Try each slug in the tier; retry on junk. Returns (text, slug_used).  
-    After a failure/junk result, pause ROTATE_BACKOFF_DELAY before the next  
-    slug so a rate-limited free-tier account can recover. The pause only fires  
-    when another slug remains, so a first-slug success has no added latency."""  
+    """Try each slug in the tier; retry on junk. Returns (text, slug_used)."""  
     if not models:  
         logger.warning("Rotation called with an empty model list; skipping.")  
         return "", ""  
     last = ""  
     used = models[0]  
-    tried = models[:MAX_SAFETYWALL_TRIES]  
-    for i, slug in enumerate(tried):  
+    for slug in models[:MAX_SAFETYWALL_TRIES]:  
         used = slug  
         try:  
             last = await call_once(prompt, slug, max_tokens)  
@@ -151,12 +134,9 @@ async def _rotate(call_once, models: list, prompt: str, max_tokens: int):
             last = ""  
         if not is_unusable(last):  
             return last, slug  
-        logger.info("Model %s produced junk/failed; rotating.", slug)  
-        if i < len(tried) - 1 and ROTATE_BACKOFF_DELAY > 0:  
-            logger.info("Backing off %.0fs before the next slug.",  
-                        ROTATE_BACKOFF_DELAY)  
-            await asyncio.sleep(ROTATE_BACKOFF_DELAY)  
-    return last, used
+        logger.info("Model %s produced junk; rotating.", slug)  
+    return last, used  
+  
   
 async def openrouter_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):  
     return await _rotate(_openrouter_once,  
@@ -182,10 +162,12 @@ async def gemini_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):
   
 # ---------------------------------------------------------------------------  
 # Confidence — judged by the JUDGE_MODELS pool (reasoning models on OpenRouter).  
-# Each judge reads a stage's OUTPUT against the user's original REQUEST and  
-# returns a 0-100 integer. A judge that errors or returns non-numeric output is  
-# DISCARDED and replaced by the next unused JUDGE_FALLBACK_MODELS slug. The  
-# surviving numeric scores are averaged. Swallows all errors so it never fails  
+# For ONE candidate the judges are tried IN ORDER: JUDGE_MODELS first, then  
+# JUDGE_FALLBACK_MODELS. The FIRST judge that returns a usable 0-100 integer  
+# wins and its score is used — no averaging. A judge that errors or returns  
+# non-numeric output is DROPPED and the next slug is tried. In the normal case  
+# only ONE judge call is made per candidate (extra slugs fire only on rubbish),  
+# which keeps OpenRouter quota usage low. Swallows all errors so it never fails  
 # a job.  
 # ---------------------------------------------------------------------------  
 _CONF_PROMPT = (  
@@ -225,23 +207,19 @@ async def _judge_once(model: str, request: str, code: str):
   
   
 async def judge_confidence(request: str, code: str) -> str:  
-    """Average the numeric scores from JUDGE_MODELS. Any judge that errors or  
-    returns non-numeric output is dropped and replaced by the next unused slug  
-    from JUDGE_FALLBACK_MODELS. Returns the rounded mean as a string, or ''  
-    if no judge (primary or fallback) produced a usable integer."""  
-    fallbacks = list(JUDGE_FALLBACK_MODELS)  
-    scores = []  
-    for model in JUDGE_MODELS:  
+    """Score ONE candidate. Try each judge slug in order — JUDGE_MODELS first  
+    (ling, then the nemotron judges), then JUDGE_FALLBACK_MODELS — and return  
+    the FIRST usable numeric score as a string. A judge that errors or returns  
+    non-numeric output is dropped and the next slug is tried. Returns '' if no  
+    judge produced a usable integer. Only ONE judge call is made per candidate  
+    in the normal case; extra slugs fire only when a judge returns rubbish."""  
+    for model in list(JUDGE_MODELS) + list(JUDGE_FALLBACK_MODELS):  
         score = await _judge_once(model, request, code)  
-        while score is None and fallbacks:  
-            spare = fallbacks.pop(0)  
-            logger.info("Replacing dropped judge with fallback %s.", spare)  
-            score = await _judge_once(spare, request, code)  
         if score is not None:  
-            scores.append(score)  
-    if not scores:  
-        return ""  
-    return str(round(sum(scores) / len(scores)))  
+            logger.info("Judge %s scored candidate %s.", model, score)  
+            return str(score)  
+        logger.info("Judge %s unusable; rotating to next judge.", model)  
+    return ""  
   
   
 # Backward-compatible alias: older callers import `inkling_confidence`.  
