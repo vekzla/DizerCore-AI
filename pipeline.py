@@ -4,11 +4,11 @@
 # user's request (no cross-checking, no chaining). All three run in parallel.  
 # The user-set complexity (1-5) picks ONE tier for the whole job:  
 #   1-2 = light, 3 = normal, 4-5 = heavy.  
-# Confidence is judged AFTER all agents finish by the JUDGE_MODELS pool: every  
-# judge scores each agent's output 0-100 against the user's original request,  
-# non-numeric judges are dropped (and replaced by fallback judges), the  
-# surviving scores are averaged, and the highest-AVERAGE agent becomes the  
-# "best" summary. The generator AIs never self-score.  
+# Confidence is judged AFTER all agents finish: for EACH agent's output the  
+# judge pool is tried one slug at a time (ling first, then the nemotron judges,  
+# then any fallbacks) and the FIRST usable numeric score wins — no averaging.  
+# The agent with the HIGHEST score becomes the "best" summary. The generator  
+# AIs never self-score.  
 import asyncio  
 import logging  
   
@@ -91,7 +91,7 @@ async def run_pipeline(job: Job) -> None:
                 _run_agent(gemini_generate, gm_on, gen_prompt, tier,  
                            "[Gemini skipped]\n\n" + job.prompt),  
             )  
-            (or_out, or_model), (gq_out, gq_model), (gm_out, gm_model) = results
+            (or_out, or_model), (gq_out, gq_model), (gm_out, gm_model) = results  
   
             # OpenRouter -> "generate" slot  
             job.steps["generate"] = or_out  
@@ -107,7 +107,10 @@ async def run_pipeline(job: Job) -> None:
             job.steps["final_status"] = "done"  
             job.touch(); save_job(job)  
   
-            # ---- Judge pool: averaged score for every agent's own output. ----  
+            # ---- Judge pool: score every agent's output, one judge at a time.  
+            # For each candidate the judges are tried in order and the FIRST  
+            # usable numeric score wins (see providers.judge_confidence).  
+            # Highest score across the agents is the winner. ----  
             if job.stages.get("inkling", True):  
                 logger.info("[Job %s] Judge pool scoring each agent...", job.id)  
                 job.steps["summary_status"] = "working"  
@@ -135,12 +138,12 @@ async def run_pipeline(job: Job) -> None:
                     except (TypeError, ValueError):  
                         pass  
                 if scores:  
-                    # Highest AVERAGE wins.  
+                    # Highest score wins.  
                     scores.sort(reverse=True)  
                     best_pct, best_name, _best_key = scores[0]  
                     job.steps["summary"] = (  
-                        f"Best is {best_name} because it scored the highest average "  
-                        f"across the judge models against your request ({best_pct}%).")  
+                        f"Best is {best_name} because it scored the highest "  
+                        f"against your request ({best_pct}%).")  
                     job.steps["summary_conf"] = str(best_pct)  
                 else:  
                     job.steps["summary"] = "The judge pool could not score any agent."  
