@@ -80,11 +80,24 @@ async def _openrouter_once(prompt: str, model: str, max_tokens: int) -> str:
         },  
         json=body,  
     )  
+    # On a 429 (rate limited), wait the server-requested Retry-After (capped)  
+    # so the account quota can recover, THEN raise so _rotate moves on.  
+    if r.status_code == 429:  
+        wait = MAX_RETRY_AFTER  
+        retry_after = r.headers.get("Retry-After")  
+        if retry_after:  
+            try:  
+                wait = min(float(retry_after), MAX_RETRY_AFTER)  
+            except (TypeError, ValueError):  
+                wait = MAX_RETRY_AFTER  
+        logger.warning("OpenRouter 429 for %s; waiting %.0fs before rotating.",  
+                       model, wait)  
+        await asyncio.sleep(wait)  
+        raise RuntimeError(f"OpenRouter 429 (rate limited): {r.text[:200]}")  
     if r.status_code in (401, 402, 403):  
         raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:300]}")  
     r.raise_for_status()  
-    return (r.json()["choices"][0]["message"].get("content") or "")  
-  
+    return (r.json()["choices"][0]["message"].get("content") or "")
   
 async def _groq_once(prompt: str, model: str, max_tokens: int) -> str:  
     await asyncio.sleep(RATE_LIMIT_DELAY)  
@@ -119,13 +132,17 @@ async def _gemini_once(prompt: str, model: str, max_tokens: int) -> str:
 # Tier-aware rotation with safetywall  
 # ---------------------------------------------------------------------------  
 async def _rotate(call_once, models: list, prompt: str, max_tokens: int):  
-    """Try each slug in the tier; retry on junk. Returns (text, slug_used)."""  
+    """Try each slug in the tier; retry on junk. Returns (text, slug_used).  
+    After a failure/junk result, pause ROTATE_BACKOFF_DELAY before the next  
+    slug so a rate-limited free-tier account can recover. The pause only fires  
+    when another slug remains, so a first-slug success has no added latency."""  
     if not models:  
         logger.warning("Rotation called with an empty model list; skipping.")  
         return "", ""  
     last = ""  
     used = models[0]  
-    for slug in models[:MAX_SAFETYWALL_TRIES]:  
+    tried = models[:MAX_SAFETYWALL_TRIES]  
+    for i, slug in enumerate(tried):  
         used = slug  
         try:  
             last = await call_once(prompt, slug, max_tokens)  
@@ -134,9 +151,12 @@ async def _rotate(call_once, models: list, prompt: str, max_tokens: int):
             last = ""  
         if not is_unusable(last):  
             return last, slug  
-        logger.info("Model %s produced junk; rotating.", slug)  
-    return last, used  
-  
+        logger.info("Model %s produced junk/failed; rotating.", slug)  
+        if i < len(tried) - 1 and ROTATE_BACKOFF_DELAY > 0:  
+            logger.info("Backing off %.0fs before the next slug.",  
+                        ROTATE_BACKOFF_DELAY)  
+            await asyncio.sleep(ROTATE_BACKOFF_DELAY)  
+    return last, used
   
 async def openrouter_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):  
     return await _rotate(_openrouter_once,  
