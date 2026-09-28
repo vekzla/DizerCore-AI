@@ -180,10 +180,10 @@ GEMINI_MODELS_BY_TIER = _tier_map(
 #   made per candidate in the normal case, keeping free-tier quota use low.  
 #   Judges authenticate with OPENROUTER_JUDGE_API_KEY — a SEPARATE OpenRouter  
 #   key from the generation key so judge quota never drains the AI key (and  
-#   vice versa). If unset, falls back to OPENROUTER_API_KEY.  
+#   vice versa). If unset, it falls back to OPENROUTER_API_KEY.  
 #   Both lists are comma-separated env-overridable.  
 #   NOTE: nvidia/nemotron-3.5-content-safety is a safety classifier and may not  
-#   return a numeric score; the parser discards non-numeric output and rotates  
+#   return a numeric score — the parser discards non-numeric output and rotates  
 #   to the next slug, so a bad slug only costs one wasted call.  
 # --------------------------------------------------------------------------- #  
 def _list_from_env(var: str, default: list) -> list:  
