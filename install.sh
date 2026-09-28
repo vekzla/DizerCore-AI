@@ -7,6 +7,9 @@
 # formats ext4 ONLY if needed (with an explicit erase warning), mounts  
 # by UUID at /mnt/dizerdata, writes the env file (incl. optional  
 # dedicated OpenRouter JUDGE key), installs the systemd service.  
+#  
+# Safe to run piped:  curl -fsSL <raw-url> | sudo bash  
+# (every read pulls from /dev/tty, not stdin — piping can't feed prompts)  
 # ==================================================================  
 set -Eeuo pipefail  
   
@@ -53,7 +56,7 @@ usb_storage_disk(){
 # ==================================================================  
 # 0. Root check  
 # ==================================================================  
-[ "$EUID" -eq 0 ] || die "Run as root: sudo bash install.sh"  
+[ "$EUID" -eq 0 ] || die "Run as root: curl ... | sudo bash   (sudo on bash, not curl)"  
   
 banner "DizerCore-AI installer"  
 echo " Repo:      $REPO ($BRANCH)"  
@@ -100,7 +103,8 @@ for i in "${!DISKS[@]}"; do
 done  
   
 echo ""  
-read -r -p "Pick disk number for DizerCore data [0]: " PICK  
+# </dev/tty: prompt reads the real terminal even when the script itself is piped in.  
+read -r -p "Pick disk number for DizerCore data [0]: " PICK < /dev/tty  
 PICK="${PICK:-0}"  
 [[ "$PICK" =~ ^[0-9]+$ ]] && [ "$PICK" -lt "${#DISKS[@]}" ] || die "Invalid choice."  
 DISK="${DISKS[$PICK]}"  
@@ -110,10 +114,7 @@ ok "Selected: $DEV ($(lsblk -dn -o MODEL "$DEV" 2>/dev/null | xargs || echo 'unk
 # ==================================================================  
 # 3. UAS quirk hotfix (fix common USB-SATA bridge resets on Pi)  
 # ==================================================================  
-VIDPID="$(lsusb | awk '{print $6}' | head -n1 || true)"  
-if [ -n "$VIDPID" ] && usb_storage_disk "$DISK"; then  
-  for id in $(lsusb -d "" 2>/dev/null | awk '{print $6}'); do :; done  
-  # find the bridge's vid:pid via sysfs  
+if usb_storage_disk "$DISK"; then  
   BP="$(readlink -f "/sys/block/$DISK/device" 2>/dev/null || true)"  
   VID="$(cat "$BP/../idVendor" 2>/dev/null || true)"  
   PID="$(cat "$BP/../idProduct" 2>/dev/null || true)"  
@@ -133,7 +134,7 @@ fi
 # ==================================================================  
 if [ -z "$(lsblk -no FSTYPE "$DEV" 2>/dev/null | head -n1)" ]; then  
   warn "NO FILESYSTEM on $DEV — it will be ERASED and formatted ext4."  
-  read -r -p "Type ERASE to confirm: " CONF  
+  read -r -p "Type ERASE to confirm: " CONF < /dev/tty  
   [ "$CONF" = "ERASE" ] || die "Aborted."  
   sudo wipefs -a "$DEV"  
   sudo mkfs.ext4 -F -L dizerdata "$DEV"  
@@ -168,6 +169,7 @@ ok "Cloning ${REPO}"
 git clone --branch "$BRANCH" "$REPO" "$APP_DIR"  
   
 ok "Stamping version"  
+# Single line: "SHA  TIMESTAMP  REPO" — version.py's get_version_info() parses it.  
 printf '%s %s %s\n' "$(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%MZ)" "$REPO" > "$APP_DIR/VERSION"  
   
 ok "Checking whether the install is on the latest commit"  
@@ -203,11 +205,11 @@ ENV_FILE="${DATA_MOUNT}/dizercore.env"
   
 echo ""  
 banner "API keys (input hidden — paste then press Enter)"  
-read -r -s -p "GEMINI_API_KEY: "              GEMINI_API_KEY;              echo ""  
-read -r -s -p "OPENROUTER_API_KEY_CODER: "    OPENROUTER_API_KEY_CODER;    echo ""  
-read -r -s -p "OPENROUTER_API_KEY_JUDGE (optional, Enter to reuse coder key): " OPENROUTER_API_KEY_JUDGE; echo ""  
-read -r -s -p "GROQ_API_KEY: "                GROQ_API_KEY;                echo ""  
-read -r -s -p "WEBUI_ADMIN_PASSWORD: "        WEBUI_ADMIN_PASSWORD;        echo ""  
+read -r -s -p "GEMINI_API_KEY: "              GEMINI_API_KEY              < /dev/tty; echo ""  
+read -r -s -p "OPENROUTER_API_KEY_CODER: "    OPENROUTER_API_KEY_CODER    < /dev/tty; echo ""  
+read -r -s -p "OPENROUTER_API_KEY_JUDGE (optional, Enter to reuse coder key): " OPENROUTER_API_KEY_JUDGE < /dev/tty; echo ""  
+read -r -s -p "GROQ_API_KEY: "                GROQ_API_KEY                < /dev/tty; echo ""  
+read -r -s -p "WEBUI_ADMIN_PASSWORD: "        WEBUI_ADMIN_PASSWORD        < /dev/tty; echo ""  
   
 [ -n "$GEMINI_API_KEY" ]           || die "GEMINI_API_KEY is required."  
 [ -n "$OPENROUTER_API_KEY_CODER" ] || die "OPENROUTER_API_KEY_CODER is required."  
@@ -246,7 +248,7 @@ ok "Writing systemd unit: $SERVICE"
   printf 'WorkingDirectory=%s\n' "$APP_DIR"  
   printf 'EnvironmentFile=%s\n' "$ENV_FILE"  
   printf 'ExecStart=/usr/bin/python3 %s\n' "$APP_DIR/$ENTRYPOINT"  
-  printf 'Restart=always\n'  
+  printf 'Restart=on-failure\n'  
   printf 'RestartSec=3\n'  
   printf 'StandardOutput=journal\n'  
   printf 'StandardError=journal\n'  
