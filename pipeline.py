@@ -162,4 +162,9 @@ async def run_job(job_id: str):
         logger.exception("[Job %s] failed: %s", job.id, e)  
     finally:  
         runtime.ATTACH.pop(job.id, None)  
-        runtime.TASKS.pop(job.id, None)
+        runtime.TASKS.pop(job.id, None)  
+  
+  
+async def run_pipeline(job):  
+    """Entrypoint called by routes.py — wraps run_job by id."""  
+    await run_job(job.id)
