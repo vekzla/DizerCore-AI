@@ -1,232 +1,60 @@
 # DizerCore-AI    
 # ----------------------------------------------------------------------------    
-# config.py — configuration, constants, model tiers, and shared predicates.    
+# dizercoreai.py — entrypoint: builds the FastAPI app, runs lifespan startup    
+# (loads keys, opens DBs, restores jobs/sessions, creates shared clients),    
+# mounts /static, and starts uvicorn.    
+import asyncio    
 import logging    
 import os    
-from dataclasses import dataclass    
-from logging.handlers import RotatingFileHandler    
-    
-# ---------------------------------------------------------------------------    
-# Paths (all persistent data lives on the SSD, set via DIZER_DATA_DIR)    
-# ---------------------------------------------------------------------------    
-DATA_DIR = os.environ.get("DIZER_DATA_DIR", "/mnt/dizerdata/dizercore")    
-os.makedirs(DATA_DIR, exist_ok=True)    
-USERS_DB = os.path.join(DATA_DIR, "dizer_users.db")    
-JOBS_DB = os.path.join(DATA_DIR, "dizer_jobs.db")    
-SESSIONS_DB = os.path.join(DATA_DIR, "dizer_sessions.db")    
-LOG_FILE = os.path.join(DATA_DIR, "dizercore.log")    
-    
-# ---------------------------------------------------------------------------    
-# Logging — INFO to console + rotating file on the SSD    
-# ---------------------------------------------------------------------------    
-logger = logging.getLogger("DizerCore")    
-if not logger.handlers:    
-    logger.setLevel(logging.INFO)    
-    _fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")    
-    _ch = logging.StreamHandler(); _ch.setFormatter(_fmt)    
-    _fh = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3)    
-    _fh.setFormatter(_fmt)    
-    logger.addHandler(_ch); logger.addHandler(_fh)    
-    
-VERSION = "1.0.0"    
-SERVICE_NAME = "dizercore"    
-    
-# ---------------------------------------------------------------------------    
-# Limits / tuning    
-# ---------------------------------------------------------------------------    
-MAX_PROMPT_CHARS = int(os.environ.get("MAX_PROMPT_CHARS", "20000"))    
-MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", "2000000"))        # 2 MB/file    
-MAX_TOTAL_FILE_BYTES = int(os.environ.get("MAX_TOTAL_FILE_BYTES", "8000000"))    
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "8192"))    
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))    
-    
-RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "2"))    
-# Serial delay BEFORE every judge call — keeps the dedicated judge key under    
-# free-tier per-minute limits. Judge calls are serialized per job through an    
-# asyncio.Lock; judging starts as soon as each agent finishes.    
-JUDGE_DELAY = float(os.environ.get("JUDGE_DELAY", "5"))    
-    
-WEBUI_ADMIN_PASSWORD = os.environ.get("WEBUI_ADMIN_PASSWORD", "")    
-    
-# ---------------------------------------------------------------------------    
-# Username / password rules (username min 5, password min 8)    
-# ---------------------------------------------------------------------------    
-MIN_USERNAME_LEN = 5    
-MIN_PASSWORD_LEN = 8    
-    
-# ---------------------------------------------------------------------------    
-# Model tiers — ONE tier per job picked by complexity.    
-# ---------------------------------------------------------------------------    
-def _list_from_env(var: str, default: list) -> list:    
-    raw = os.environ.get(var, "")    
-    if not raw.strip():    
-        return list(default)    
-    return [s.strip() for s in raw.split(",") if s.strip()]    
-    
-    
-def _tier_map(prefix: str, light: list, normal: list, heavy: list) -> dict:    
-    return {    
-        "light": _list_from_env(prefix + "_LIGHT", light),    
-        "normal": _list_from_env(prefix + "_NORMAL", normal),    
-        "heavy": _list_from_env(prefix + "_HEAVY", heavy),    
-    }    
-    
-    
-# OpenRouter — 3 slugs per tier. 'inkling' models may 403 ("agentic harnesses    
-# only") on a plain API key; the safetywall rotation tolerates that.    
-OPENROUTER_MODELS_BY_TIER = _tier_map(    
-    "OPENROUTER_MODEL",    
-    light=[    
-        "poolside/laguna-xs-2.1:free",    
-        "cohere/north-mini-code:free",    
-        "thinkingmachines/inkling-small:free",    
-    ],    
-    normal=[    
-        "poolside/laguna-s-2.1:free",    
-        "thinkingmachines/inkling:free",    
-        "qwen/qwen3.8-27b:free",    
-    ],    
-    heavy=[    
-        "nvidia/nemotron-3-super-120b-a12b:free",    
-        "nvidia/nemotron-3-ultra-550b-a55b:free",    
-        "google/gemma-4-31b-it:free",    
-    ],    
+from contextlib import asynccontextmanager    
+  
+import httpx    
+from fastapi import FastAPI    
+from fastapi.staticfiles import StaticFiles    
+from google import genai    
+  
+import runtime    
+from config import Config, LOG_FILE, MAX_CONCURRENT_JOBS, setup_logging    
+from db import (    
+    init_users_db, init_sessions_db, init_jobs_db, load_sessions, load_jobs,    
 )    
-    
-GROQ_MODELS_BY_TIER = _tier_map(    
-    "GROQ_MODEL",    
-    light=["llama-3.1-8b-instant"],    
-    normal=["llama-3.3-70b-versatile"],    
-    heavy=["llama-3.3-70b-versatile"],    
-)    
-    
-GEMINI_MODELS_BY_TIER = _tier_map(    
-    "GEMINI_MODEL",    
-    light=["gemini-2.0-flash-lite"],    
-    normal=["gemini-2.0-flash"],    
-    heavy=["gemini-2.5-pro"],    
-)    
-    
-# ---------------------------------------------------------------------------    
-# Judge pool — scores each candidate 0-100, FIRST usable score wins.    
-# Ordered best-first; pipeline rotates the start index per candidate    
-# (OpenRouter->0, Gemini->1, Groq->last), wrap-around fallback.    
-# ---------------------------------------------------------------------------    
-JUDGE_MODELS = _list_from_env(    
-    "JUDGE_MODELS",    
-    [    
-        "google/gemma-4-26b-a4b-it:free",    
-        "dots-studio/dots-3-note-preview:free",    
-        "liquid/lfm-2.5-2.6b:free",    
-        # "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  # pending endpoint test    
-    ],    
-)    
-JUDGE_FALLBACK_MODELS = _list_from_env("JUDGE_FALLBACK_MODELS", [])    
-    
-# Legacy stage-toggle name kept for job.stages["inkling"].    
-INKLING_MODEL = "thinkingmachines/inkling-small:free"    
-    
-# ---------------------------------------------------------------------------    
-# Vision-capable slugs — accept image/PDF input. Used to route jobs that    
-# include binary attachments; text-only slugs get a note instead.    
-# ---------------------------------------------------------------------------    
-VISION_MODELS = {    
-    "google/gemma-4-31b-it:free",    
-    "google/gemma-4-26b-a4b-it:free",    
-    "dots-studio/dots-3-note-preview:free",    
-    # "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  # if endpoint test passes    
-}    
-    
-# ---------------------------------------------------------------------------    
-# Reasoning-capable slugs — get "reasoning": {"enabled": true} in the request    
-# body. Built automatically from the OpenRouter tiers + judge pool so any slug    
-# added above is picked up here (all current slugs are reasoning-capable).    
-# ---------------------------------------------------------------------------    
-def _env_flag(var: str) -> bool:    
-    """True if an env var flag is set ('1','true','on','yes')."""    
-    return os.environ.get(var, "").strip().lower() in ("1", "true", "on", "yes")    
-    
-    
-_ALL_OPENROUTER_SLUGS = {    
-    slug    
-    for tier_slugs in OPENROUTER_MODELS_BY_TIER.values()    
-    for slug in tier_slugs    
-}    
-# Every OpenRouter slug we use supports reasoning. Add slugs to this SET if you    
-# introduce a model that must NOT get the reasoning flag. NOTE: must be a real    
-# set — bare {} here is a dict and breaks the subtraction below.    
-_NON_REASONING = set()    
-    
-REASONING_MODELS = (    
-    _ALL_OPENROUTER_SLUGS | set(JUDGE_MODELS) | set(JUDGE_FALLBACK_MODELS)    
-) - set(_NON_REASONING)    
-    
-# ---------------------------------------------------------------------------    
-# Shared predicates    
-# ---------------------------------------------------------------------------    
-def tier_for(complexity: int) -> str:    
-    """Complexity 1-2 -> light, 3 -> normal, 4-5 -> heavy."""    
-    if complexity <= 2:    
-        return "light"    
-    if complexity <= 3:    
-        return "normal"    
-    return "heavy"    
-    
-    
-def _is_unusable(text: str) -> bool:    
-    """Safetywall predicate: True if a generation output is junk."""    
-    t = (text or "").strip()    
-    if len(t) < 40:    
-        return True    
-    if t.startswith("["):  # provider error / skipped note    
-        return True    
-    return False    
-    
-    
-# ---------------------------------------------------------------------------    
-# File-type routing for uploads    
-# ---------------------------------------------------------------------------    
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}    
-PDF_EXTS = {".pdf"}    
-DOCX_EXTS = {".docx"}    
-# Everything else is treated as text/code (incl. .sql .cpp .h .py .txt .md ...)    
-    
-    
-def classify_upload(filename: str) -> str:    
-    """Return 'image' | 'pdf' | 'docx' | 'text' for a filename."""    
-    ext = os.path.splitext(filename or "")[1].lower()    
-    if ext in IMAGE_EXTS:    
-        return "image"    
-    if ext in PDF_EXTS:    
-        return "pdf"    
-    if ext in DOCX_EXTS:    
-        return "docx"    
-    return "text"    
-    
-    
-# ---------------------------------------------------------------------------    
-# Runtime config — loaded once at startup into runtime.cfg    
-# ---------------------------------------------------------------------------    
-@dataclass    
-class Config:    
-    gemini_key: str    
-    openrouter_key: str        # generation key (OPENROUTER_API_KEY_CODER)    
-    groq_key: str    
-    judge_key: str             # dedicated key for the judge pool    
-    
-    @staticmethod    
-    def from_env() -> "Config":    
-        missing = [k for k in ("GEMINI_API_KEY", "OPENROUTER_API_KEY_CODER", "GROQ_API_KEY")    
-                   if not os.environ.get(k)]    
-        if missing:    
-            raise RuntimeError(    
-                f"Missing required environment variables: {', '.join(missing)}")    
-        # Judge key is optional: falls back to the generation key so existing    
-        # installs keep working until a second key is provided.    
-        return Config(    
-            gemini_key=os.environ["GEMINI_API_KEY"],    
-            openrouter_key=os.environ["OPENROUTER_API_KEY_CODER"],    
-            groq_key=os.environ["GROQ_API_KEY"],    
-            judge_key=os.environ.get("OPENROUTER_API_KEY_JUDGE")    
-                      or os.environ["OPENROUTER_API_KEY_CODER"],    
-        )
+from routes import router    
+  
+  
+@asynccontextmanager    
+async def lifespan(app: FastAPI):    
+    setup_logging()    
+    log = logging.getLogger("dizercoreai")    
+    runtime.cfg = Config.from_env()    
+  
+    init_users_db()    
+    init_sessions_db()    
+    init_jobs_db()    
+    runtime.SESSIONS.update(load_sessions())    
+    runtime.JOBS.update(load_jobs())    
+    log.info("Restored %d sessions, %d jobs.",    
+             len(runtime.SESSIONS), len(runtime.JOBS))    
+  
+    runtime.gemini_client = genai.Client(api_key=runtime.cfg.gemini_key)    
+    # No read timeout: streaming responses can run for minutes.    
+    runtime.http_client = httpx.AsyncClient(    
+        timeout=httpx.Timeout(120.0, read=None)    
+    )    
+    runtime.job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)    
+    log.info("Startup complete.")    
+    yield    
+    await runtime.http_client.aclose()    
+  
+  
+app = FastAPI(lifespan=lifespan)    
+  
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")    
+os.makedirs(_STATIC_DIR, exist_ok=True)    
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")    
+  
+app.include_router(router)    
+  
+if __name__ == "__main__":    
+    import uvicorn    
+    port = int(os.environ.get("PORT", "8000"))    
+    uvicorn.run(app, host="0.0.0.0", port=port)
