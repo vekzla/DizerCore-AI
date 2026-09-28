@@ -1,5 +1,6 @@
-# providers.py  
-# DizercoreAI — provider integrations (OpenRouter, Groq, Gemini).  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# providers.py — provider integrations (OpenRouter, Groq, Gemini).  
 # Tier-aware calls rotate model slugs (light/normal/heavy). A safetywall  
 # re-checks each output and retries on junk, rotating to the next slug.  
 # RATE_LIMIT_DELAY is awaited before every outbound call to avoid burst caps.  
@@ -10,10 +11,12 @@
 # candidate the judges are tried IN ORDER (JUDGE_MODELS, then  
 # JUDGE_FALLBACK_MODELS) and the FIRST usable numeric score wins. A judge that  
 # errors or returns non-numeric output is dropped and the next slug is tried.  
-# Only one judge call is made per candidate in the normal case. Generator AIs  
-# never self-score.  
+# Judge calls authenticate with runtime.cfg.judge_key (OPENROUTER_JUDGE_API_KEY)  
+# — a SEPARATE OpenRouter key from generation, so judge quota never drains the  
+# AI key. Generator AIs never self-score.  
 import asyncio  
 import logging  
+import re  
   
 from google.genai import types  
   
@@ -36,21 +39,8 @@ logger = logging.getLogger("DizerCore")
   
   
 # ---------------------------------------------------------------------------  
-# Tier + junk helpers  
+# Junk helper (tier mapping lives in config.tier_for — single source of truth)  
 # ---------------------------------------------------------------------------  
-def tier_for(complexity: int) -> str:  
-    """1-2 = light, 3 = normal, 4-5 = heavy (user-set on each job)."""  
-    try:  
-        c = int(complexity)  
-    except (TypeError, ValueError):  
-        c = 3  
-    if c <= 2:  
-        return "light"  
-    if c == 3:  
-        return "normal"  
-    return "heavy"  
-  
-  
 def is_unusable(text: str) -> bool:  
     """True if a stage produced nothing, or deflected instead of doing the work.  
     Delegates to config._is_unusable so the deflection list never diverges."""  
@@ -167,8 +157,9 @@ async def gemini_generate(prompt, tier="normal", max_tokens=MAX_OUTPUT_TOKENS):
 # wins and its score is used — no averaging. A judge that errors or returns  
 # non-numeric output is DROPPED and the next slug is tried. In the normal case  
 # only ONE judge call is made per candidate (extra slugs fire only on rubbish),  
-# which keeps OpenRouter quota usage low. Swallows all errors so it never fails  
-# a job.  
+# which keeps OpenRouter quota usage low. Judge calls use the DEDICATED judge  
+# key (OPENROUTER_JUDGE_API_KEY), not the generation key. Swallows all errors  
+# so it never fails a job.  
 # ---------------------------------------------------------------------------  
 _CONF_PROMPT = (  
     "You are an impartial judge. Rate from 0 to 100 how well the CODE satisfies "  
@@ -178,25 +169,50 @@ _CONF_PROMPT = (
 )  
 _CONF_MAX_TOKENS = 512  
   
+# First standalone integer in 0-100 (word-boundary anchored so digits inside  
+# longer numbers like "2024" or "85100" don't match).  
+_SCORE_RE = re.compile(r"\b(100|[1-9]?\d)\b")  
+  
   
 def _parse_score(out: str):  
-    """Extract a 0-100 integer from a judge's raw output, or None if none."""  
-    digits = "".join(ch for ch in out if ch.isdigit())[:3]  
-    if not digits:  
+    """Extract a 0-100 integer from a judge's raw output, or None if none.  
+    Uses the first standalone 0-100 integer so outputs like "Score: 85/100",  
+    "2024 score: 85", or reasoning chatter don't get digit-spliced into a  
+    bogus number."""  
+    m = _SCORE_RE.search(out or "")  
+    if not m:  
         return None  
-    try:  
-        val = int(digits)  
-    except (TypeError, ValueError):  
-        return None  
+    val = int(m.group(1))  
     return max(0, min(100, val))  
   
   
 async def _judge_once(model: str, request: str, code: str):  
-    """Run a single judge slug. Returns an int score or None (error/non-numeric)."""  
+    """Run a single judge slug. Returns an int score or None (error/non-numeric).  
+    Uses the DEDICATED judge key (runtime.cfg.judge_key), not the generation key,  
+    so the judge pool draws from its own OpenRouter quota."""  
     try:  
-        out = await _openrouter_once(  
-            _CONF_PROMPT.format(req=request, code=code),  
-            model, _CONF_MAX_TOKENS)  
+        await asyncio.sleep(RATE_LIMIT_DELAY)  
+        body = {  
+            "model": model,  
+            "messages": [{"role": "user", "content":  
+                          _CONF_PROMPT.format(req=request, code=code)}],  
+            "max_tokens": _CONF_MAX_TOKENS,  
+        }  
+        if model in REASONING_MODELS:  
+            body["reasoning"] = {"enabled": True}  
+        r = await runtime.http_client.post(  
+            "https://openrouter.ai/api/v1/chat/completions",  
+            headers={  
+                "Authorization": f"Bearer {runtime.cfg.judge_key}",  
+                "HTTP-Referer": "http://192.168.1.6:8000",  
+                "X-Title": "DizerCore.AI",  
+            },  
+            json=body,  
+        )  
+        if r.status_code in (401, 402, 403, 429):  
+            raise RuntimeError(f"Judge {r.status_code}: {r.text[:300]}")  
+        r.raise_for_status()  
+        out = r.json()["choices"][0]["message"].get("content") or ""  
     except Exception as e:                           # noqa: BLE001  
         logger.warning("Judge %s failed: %s", model, e)  
         return None  
@@ -222,5 +238,5 @@ async def judge_confidence(request: str, code: str) -> str:
     return ""  
   
   
-# Backward-compatible alias: older callers import `inkling_confidence`.  
+# Deprecated: kept so older callers importing `inkling_confidence` still work.  
 inkling_confidence = judge_confidence
