@@ -1,2 +1,5 @@
-*.sh text eol=lf  
+# DizerCore-AI — force LF for scripts (protects install.sh from CRLF breakage)  
+* text=auto  
+*.sh  text eol=lf  
+*.py  text eol=lf  
 *.png binary
