@@ -1,181 +1,197 @@
-# DizerCore-AI  
-# ----------------------------------------------------------------------------  
-# pipeline.py — the 3-agent pipeline runner.  
-# OpenRouter, Groq, and Gemini each INDEPENDENTLY write their own code for the  
-# user's request (no cross-checking, no chaining). All three run in parallel.  
-# The user-set complexity (1-5) picks ONE tier for the whole job:  
-#   1-2 = light, 3 = normal, 4-5 = heavy.  
-# Confidence is judged AFTER all agents finish: every agent's output is scored  
-# in parallel — for EACH candidate the judge pool is tried one slug at a time  
-# (ling first, then the nemotron judges, then any fallbacks) and the FIRST  
-# usable numeric score wins — no averaging. The agent with the HIGHEST score  
-# becomes the "best" summary. The generator AIs never self-score.  
-import asyncio  
-import logging  
-  
-import runtime  
-from config import tier_for  
-from db import State, Job, save_job  
-from providers import (  
-    openrouter_generate,  
-    groq_generate,  
-    gemini_generate,  
-    judge_confidence,  
-)  
-  
-logger = logging.getLogger("DizerCore")  
-  
-# Every agent gets the SAME independent instruction + the user's raw request.  
-_GEN_PROMPT = (  
-    "Write complete, runnable code implementing this request. "  
-    "Return ONLY code, minimal comments. Do NOT ask for the code — "  
-    "you must produce it yourself.\n\nREQUEST:\n"  
-)  
-  
-  
-async def _run_agent(generate, enabled: bool, prompt: str, tier: str,  
-                     skip_msg: str):  
-    """Run ONE agent independently. Returns (output, model_used).  
-    If the agent is toggled off, returns a skip marker instead of calling out."""  
-    if not enabled:  
-        return skip_msg, "(skipped)"  
-    try:  
-        return await generate(prompt, tier=tier)  
-    except Exception as e:  # noqa: BLE001  
-        logger.warning("Agent generation failed: %s", e)  
-        return "", ""  
-  
-  
-async def _judge_candidate(job: Job, name: str, key: str, output: str,  
-                           ran: bool):  
-    """Score ONE candidate against the user's prompt.  
-    Returns (int_score, name, key) on success, or None. A failed or skipped  
-    judge writes "" to the step and never fails the job."""  
-    if not ran:  
-        job.steps[key + "_conf"] = ""  
-        return None  
-    try:  
-        pct = await judge_confidence(job.prompt, output)  
-    except Exception as e:  # noqa: BLE001  
-        logger.info("[Job %s] %s scoring skipped (%s).", job.id, name, e)  
-        pct = ""  
-    job.steps[key + "_conf"] = pct  
-    try:  
-        return (int(pct), name, key)  
-    except (TypeError, ValueError):  
-        return None  
-  
-  
-def _pick_winner(scores: list):  
-    """Given [(pct, name, key), ...] return (best_pct, best_name) or None."""  
-    if not scores:  
-        return None  
-    scores.sort(reverse=True)  # highest score wins  
-    best_pct, best_name, _best_key = scores[0]  
-    return best_pct, best_name  
-  
-  
-async def run_pipeline(job: Job) -> None:  
-    try:  
-        async with runtime.job_semaphore:  
-            job.state = State.RUNNING  
-            job.touch(); save_job(job)  
-  
-            # Step 1 — pick the tier for the whole job from user complexity.  
-            tier = tier_for(getattr(job, "complexity", 3))  
-            logger.info("[Job %s] complexity=%s -> tier=%s",  
-                        job.id, getattr(job, "complexity", 3), tier)  
-  
-            gen_prompt = _GEN_PROMPT + job.prompt  
-  
-            # Step 2 — read the per-agent toggles.  
-            or_on = job.stages.get("openrouter", True)  
-            gq_on = job.stages.get("groq", True)  
-            gm_on = job.stages.get("gemini", True)  
-  
-            # Mark every enabled agent as "working" up front so the UI shows  
-            # all three spinning at once.  
-            job.steps["generate_status"] = "working" if or_on else "done"  
-            job.steps["verify_status"] = "working" if gq_on else "done"  
-            job.steps["final_status"] = "working" if gm_on else "done"  
-            job.touch(); save_job(job)  
-  
-            logger.info("[Job %s] Running OpenRouter, Groq, Gemini in parallel "  
-                        "(tier=%s)...", job.id, tier)  
-  
-            # Step 3 — all three agents work independently, at the same time.  
-            results = await asyncio.gather(  
-                _run_agent(openrouter_generate, or_on, gen_prompt, tier,  
-                           "[OpenRouter skipped]\n\n" + job.prompt),  
-                _run_agent(groq_generate, gq_on, gen_prompt, tier,  
-                           "[Groq skipped]\n\n" + job.prompt),  
-                _run_agent(gemini_generate, gm_on, gen_prompt, tier,  
-                           "[Gemini skipped]\n\n" + job.prompt),  
-            )  
-            (or_out, or_model), (gq_out, gq_model), (gm_out, gm_model) = results  
-  
-            # Step 4 — write each agent's output into its UI slot.  
-            # OpenRouter -> "generate" slot  
-            job.steps["generate"] = or_out  
-            job.steps["generate_model"] = or_model  
-            job.steps["generate_status"] = "done"  
-            # Groq -> "verify" slot  
-            job.steps["verify"] = gq_out  
-            job.steps["verify_model"] = gq_model  
-            job.steps["verify_status"] = "done"  
-            # Gemini -> "final" slot  
-            job.steps["final"] = gm_out  
-            job.steps["final_model"] = gm_model  
-            job.steps["final_status"] = "done"  
-            job.touch(); save_job(job)  
-  
-            # Step 5 — judge pool: score EVERY agent's output IN PARALLEL.  
-            # Each candidate walks the judge list internally (first usable  
-            # numeric score wins — see providers.judge_confidence), so the  
-            # candidates no longer wait on each other. Highest score wins.  
-            if job.stages.get("inkling", True):  
-                logger.info("[Job %s] Judge pool scoring each agent...", job.id)  
-                job.steps["summary_status"] = "working"  
-                job.touch(); save_job(job)  
-                candidates = [  
-                    ("OpenRouter", "generate", or_out, or_on),  
-                    ("Groq",       "verify",   gq_out, gq_on),  
-                    ("Gemini",     "final",    gm_out, gm_on),  
-                ]  
-                results = await asyncio.gather(*(  
-                    _judge_candidate(job, name, key, out, ran)  
-                    for name, key, out, ran in candidates  
-                ))  
-                scores = [r for r in results if r is not None]  
-                job.touch(); save_job(job)  
-  
-                # Step 6 — pick the winner and write the summary.  
-                winner = _pick_winner(scores)  
-                if winner:  
-                    best_pct, best_name = winner  
-                    job.steps["summary"] = (  
-                        f"Best is {best_name} because it scored the highest "  
-                        f"against your request ({best_pct}%).")  
-                    job.steps["summary_conf"] = str(best_pct)  
-                else:  
-                    job.steps["summary"] = "The judge pool could not score any agent."  
-                    job.steps["summary_conf"] = ""  
-                job.steps["summary_status"] = "done"  
-                job.touch(); save_job(job)  
-  
-            job.state = State.DONE  
-            job.touch(); save_job(job)  
-            logger.info("[Job %s] done.", job.id)  
-    except asyncio.CancelledError:  
-        job.state = State.CANCELLED  
-        job.error = "Cancelled by user."  
-        job.touch(); save_job(job)  
-        logger.info("[Job %s] cancelled.", job.id)  
-        raise  
-    except Exception as e:  # noqa: BLE001  
-        job.state = State.FAILED  
-        job.error = str(e)  
-        job.touch(); save_job(job)  
-        logger.exception("[Job %s] failed: %s", job.id, e)  
-    finally:  
+# DizerCore-AI    
+# ----------------------------------------------------------------------------    
+# pipeline.py — the 3-agent pipeline runner.    
+# OpenRouter, Groq, and Gemini each INDEPENDENTLY write their own code for the    
+# user's request (no cross-checking, no chaining). All three run in parallel.    
+# The user-set complexity (1-5) picks ONE tier for the whole job:    
+#   1-2 = light, 3 = normal, 4-5 = heavy.    
+# Confidence is judged AFTER all agents finish: every agent's output is scored    
+# ONE AT A TIME, IN SERIES — for EACH candidate the judge pool is tried one    
+# slug at a time (JUDGE_DELAY between calls) and the FIRST usable numeric    
+# score wins — no averaging. Series judging keeps the dedicated judge key    
+# under its per-minute token limit. The agent with the HIGHEST score becomes    
+# the "best" summary, and the winning judge's comments are shown alongside it.    
+# The generator AIs never self-score.    
+import asyncio    
+import logging    
+    
+import runtime    
+from config import tier_for    
+from db import State, Job, save_job    
+from providers import (    
+    openrouter_generate,    
+    groq_generate,    
+    gemini_generate,    
+    judge_confidence,    
+)    
+    
+logger = logging.getLogger("DizerCore")    
+    
+# Every agent gets the SAME independent instruction + the user's raw request.    
+_GEN_PROMPT = (    
+    "Write complete, runnable code implementing this request. "    
+    "Return ONLY code, minimal comments. Do NOT ask for the code — "    
+    "you must produce it yourself.\n\nREQUEST:\n"    
+)    
+    
+    
+async def _run_agent(generate, enabled: bool, prompt: str, tier: str,    
+                     skip_msg: str):    
+    """Run ONE agent independently. Returns (output, model_used).    
+    If the agent is toggled off, returns a skip marker instead of calling out."""    
+    if not enabled:    
+        return skip_msg, "(skipped)"    
+    try:    
+        return await generate(prompt, tier=tier)    
+    except Exception as e:  # noqa: BLE001    
+        logger.warning("Agent generation failed: %s", e)    
+        return "", ""    
+    
+    
+async def _judge_candidate(job: Job, name: str, key: str, output: str,    
+                           ran: bool):    
+    """Score ONE candidate against the user's prompt.    
+    Returns (int_score, name, key, comments) on success, or None. A failed or    
+    skipped judge writes "" to the step and never fails the job. Must be    
+    awaited SEQUENTIALLY — judge calls run in series to protect the judge    
+    key's per-minute token budget."""    
+    if not ran:    
+        job.steps[key + "_conf"] = ""    
+        job.steps[key + "_judge_comments"] = ""    
+        return None    
+    try:    
+        pct, comments = await judge_confidence(job.prompt, output)    
+    except Exception as e:  # noqa: BLE001    
+        logger.info("[Job %s] %s scoring skipped (%s).", job.id, name, e)    
+        pct, comments = "", ""    
+    job.steps[key + "_conf"] = pct    
+    job.steps[key + "_judge_comments"] = comments    
+    try:    
+        return (int(pct), name, key, comments)    
+    except (TypeError, ValueError):    
+        return None    
+    
+    
+def _pick_winner(scores: list):    
+    """Given [(pct, name, key, comments), ...] return    
+    (best_pct, best_name, best_comments) or None."""    
+    if not scores:    
+        return None    
+    scores.sort(reverse=True)  # highest score wins    
+    best_pct, best_name, _best_key, best_comments = scores[0]    
+    return best_pct, best_name, best_comments    
+    
+    
+async def run_pipeline(job: Job) -> None:    
+    try:    
+        async with runtime.job_semaphore:    
+            job.state = State.RUNNING    
+            job.touch(); save_job(job)    
+    
+            # Step 1 — pick the tier for the whole job from user complexity.    
+            tier = tier_for(getattr(job, "complexity", 3))    
+            logger.info("[Job %s] complexity=%s -> tier=%s",    
+                        job.id, getattr(job, "complexity", 3), tier)    
+    
+            gen_prompt = _GEN_PROMPT + job.prompt    
+    
+            # Step 2 — read the per-agent toggles.    
+            or_on = job.stages.get("openrouter", True)    
+            gq_on = job.stages.get("groq", True)    
+            gm_on = job.stages.get("gemini", True)    
+    
+            # Mark every enabled agent as "working" up front so the UI shows    
+            # all three spinning at once.    
+            job.steps["generate_status"] = "working" if or_on else "done"    
+            job.steps["verify_status"] = "working" if gq_on else "done"    
+            job.steps["final_status"] = "working" if gm_on else "done"    
+            job.touch(); save_job(job)    
+    
+            logger.info("[Job %s] Running OpenRouter, Groq, Gemini in parallel "    
+                        "(tier=%s)...", job.id, tier)    
+    
+            # Step 3 — all three agents work independently, at the same time.    
+            results = await asyncio.gather(    
+                _run_agent(openrouter_generate, or_on, gen_prompt, tier,    
+                           "[OpenRouter skipped]\n\n" + job.prompt),    
+                _run_agent(groq_generate, gq_on, gen_prompt, tier,    
+                           "[Groq skipped]\n\n" + job.prompt),    
+                _run_agent(gemini_generate, gm_on, gen_prompt, tier,    
+                           "[Gemini skipped]\n\n" + job.prompt),    
+            )    
+            (or_out, or_model), (gq_out, gq_model), (gm_out, gm_model) = results    
+    
+            # Step 4 — write each agent's output into its UI slot.    
+            # OpenRouter -> "generate" slot    
+            job.steps["generate"] = or_out    
+            job.steps["generate_model"] = or_model    
+            job.steps["generate_status"] = "done"    
+            # Groq -> "verify" slot    
+            job.steps["verify"] = gq_out    
+            job.steps["verify_model"] = gq_model    
+            job.steps["verify_status"] = "done"    
+            # Gemini -> "final" slot    
+            job.steps["final"] = gm_out    
+            job.steps["final_model"] = gm_model    
+            job.steps["final_status"] = "done"    
+            job.touch(); save_job(job)    
+    
+            # Step 5 — judge pool: score each agent's output IN SERIES, one    
+            # candidate fully finished before the next begins. Each candidate    
+            # walks the judge list internally with JUDGE_DELAY between calls    
+            # (first usable numeric score wins — see providers.judge_confidence),    
+            # so the dedicated judge key never gets a burst of parallel calls    
+            # that would trip its per-minute token limit. Highest score wins.    
+            if job.stages.get("inkling", True):    
+                logger.info("[Job %s] Judge pool scoring each agent (in series)...",    
+                            job.id)    
+                job.steps["summary_status"] = "working"    
+                job.touch(); save_job(job)    
+                candidates = [    
+                    ("OpenRouter", "generate", or_out, or_on),    
+                    ("Groq",       "verify",   gq_out, gq_on),    
+                    ("Gemini",     "final",    gm_out, gm_on),    
+                ]    
+                scores = []    
+                for name, key, out, ran in candidates:    
+                    result = await _judge_candidate(job, name, key, out, ran)    
+                    if result is not None:    
+                        scores.append(result)    
+                    # Persist after each candidate so the UI shows scores and    
+                    # comments arriving one at a time as judges finish.    
+                    job.touch(); save_job(job)    
+    
+                # Step 6 — pick the winner and write the summary with the    
+                # winning judge's detailed comments.    
+                winner = _pick_winner(scores)    
+                if winner:    
+                    best_pct, best_name, best_comments = winner    
+                    summary = (    
+                        f"Best is {best_name} because it scored the highest "    
+                        f"against your request ({best_pct}%).")    
+                    if best_comments:    
+                        summary += f" Judge: {best_comments}"    
+                    job.steps["summary"] = summary    
+                    job.steps["summary_conf"] = str(best_pct)    
+                else:    
+                    job.steps["summary"] = "The judge pool could not score any agent."    
+                    job.steps["summary_conf"] = ""    
+                job.steps["summary_status"] = "done"    
+                job.touch(); save_job(job)    
+    
+            job.state = State.DONE    
+            job.touch(); save_job(job)    
+            logger.info("[Job %s] done.", job.id)    
+    except asyncio.CancelledError:    
+        job.state = State.CANCELLED    
+        job.error = "Cancelled by user."    
+        job.touch(); save_job(job)    
+        logger.info("[Job %s] cancelled.", job.id)    
+        raise    
+    except Exception as e:  # noqa: BLE001    
+        job.state = State.FAILED    
+        job.error = str(e)    
+        job.touch(); save_job(job)    
+        logger.exception("[Job %s] failed: %s", job.id, e)    
+    finally:    
         runtime.TASKS.pop(job.id, None)
