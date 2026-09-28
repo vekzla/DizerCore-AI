@@ -1,8 +1,7 @@
 # DizerCore-AI  
 # ----------------------------------------------------------------------------  
-# db.py — SQLite persistence: users, sessions, and jobs.  
+# db.py — SQLite persistence for DizerCoreAI: users, sessions, and jobs.  
 # Pure stdlib (sqlite3 + hashlib/hmac) — no external DB dependency.  
-# Single source of truth for the user/session store (auth.py re-exports these).  
 import hashlib  
 import hmac  
 import json  
@@ -96,7 +95,7 @@ class State(str, Enum):
   
 def _default_steps() -> dict:  
     # Per stage we keep the text output plus which model produced it and a  
-    # 1-100 confidence score (scored by the judge pool, not the stage's own  
+    # 0-100 confidence score (scored by the judge pool, not the stage's own  
     # model). Blank strings render as empty panels in the UI.  
     # `*_status` is a live progress flag ("working"/"done"/"") that the  
     # dashboard animates into a "working…" spinner while the stage runs.  
