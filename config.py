@@ -1,5 +1,6 @@
-# config.py  
-# DizercoreAI — configuration, constants, model tiers, and shared predicates.  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# config.py — configuration, constants, model tiers, and shared predicates.  
 import logging  
 import os  
 from dataclasses import dataclass  
@@ -36,7 +37,6 @@ MAX_PROMPT_CHARS = 200_000
 MAX_FILE_BYTES = 5_000_000  
 MAX_TOTAL_FILE_BYTES = 20_000_000  
 MAX_CONCURRENT_JOBS = 2  
-MAX_PIPELINE_RETRIES = 2        # times a stage re-interrogates itself on junk  
   
 # Cap for junk-retry rotation loops. Must be >= the length of the longest tier  
 # list below, otherwise fallback slugs past this index are never reached.  
@@ -46,16 +46,6 @@ MAX_SAFETYWALL_TRIES = int(os.environ.get("MAX_SAFETYWALL_TRIES", "8"))
 # Seconds inserted before EVERY outbound model call so bursts of requests do  
 # not trip the free-tier per-minute limits. Override via the env var.  
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))  
-  
-# Extra pause (seconds) before rotating to the NEXT model slug after a failure  
-# or junk output. This is ON TOP of RATE_LIMIT_DELAY and only fires on rotation,  
-# so a clean first-slug success has no added latency. Gives the free-tier  
-# account quota a moment to recover before the next attempt hits it again.  
-ROTATE_BACKOFF_DELAY = float(os.environ.get("ROTATE_BACKOFF_DELAY", "20"))  
-  
-# Hard cap (seconds) on how long we honor a 429 "Retry-After" header before  
-# giving up and rotating, so a single rate-limited slug can't hang a job.  
-MAX_RETRY_AFTER = float(os.environ.get("MAX_RETRY_AFTER", "60"))
   
 # Max output tokens per generation call. 1500 truncated large files (e.g. full  
 # SQL schemas), so raise it. Keep <= ~6000 because Groq's gpt-oss models are  
@@ -179,13 +169,22 @@ GEMINI_MODELS_BY_TIER = _tier_map(
         "gemini-3.1-flash-lite",  
     ],  
 )  
+  
 # --------------------------------------------------------------------------- #  
 # Judge models — score each agent's output 0-100 AFTER all stages run.  
-#   Every model in JUDGE_MODELS scores each candidate; any judge that returns  
-#   non-numeric output (or errors) is DISCARDED and replaced by the next unused  
-#   slug from JUDGE_FALLBACK_MODELS. The surviving numeric scores are averaged,  
-#   and the agent (OpenRouter / Groq / Gemini) with the highest average wins.  
+#   For each candidate the judges in JUDGE_MODELS are tried IN ORDER; a judge  
+#   that errors or returns non-numeric output is DISCARDED and the next slug  
+#   is tried, falling through to JUDGE_FALLBACK_MODELS if needed. The FIRST  
+#   usable 0-100 score wins (no averaging), and the agent (OpenRouter / Groq /  
+#   Gemini) with the highest score is reported as best. Only ONE judge call is  
+#   made per candidate in the normal case, keeping free-tier quota use low.  
+#   Judges authenticate with OPENROUTER_JUDGE_API_KEY — a SEPARATE OpenRouter  
+#   key from the generation key so judge quota never drains the AI key (and  
+#   vice versa). If unset, falls back to OPENROUTER_API_KEY.  
 #   Both lists are comma-separated env-overridable.  
+#   NOTE: nvidia/nemotron-3.5-content-safety is a safety classifier and may not  
+#   return a numeric score; the parser discards non-numeric output and rotates  
+#   to the next slug, so a bad slug only costs one wasted call.  
 # --------------------------------------------------------------------------- #  
 def _list_from_env(var: str, default: list) -> list:  
     raw = os.environ.get(var)  
@@ -218,7 +217,7 @@ REASONING_MODELS.add(INKLING_MODEL)
   
   
 # --------------------------------------------------------------------------- #  
-# Deflection / verdict detection  
+# Deflection detection  
 # --------------------------------------------------------------------------- #  
 def _is_unusable(text: str) -> bool:  
     """True if a stage produced nothing, or deflected instead of doing the work."""  
@@ -234,21 +233,20 @@ def _is_unusable(text: str) -> bool:
     return any(d in low for d in deflections)  
   
   
-def _verdict_pass(text: str) -> bool:  
-    up = (text or "").upper()  
-    if "FAIL" in up:  
-        return False  
-    return "PASS" in up  
-  
-  
 # --------------------------------------------------------------------------- #  
 # API keys  
+#   OPENROUTER_API_KEY        -> generation calls (the AI agents)  
+#   OPENROUTER_JUDGE_API_KEY  -> judge pool calls only (separate quota so the  
+#                                judges can't rate-limit generation, and  
+#                                generation can't starve the judges). Optional:  
+#                                falls back to OPENROUTER_API_KEY if unset.  
 # --------------------------------------------------------------------------- #  
 @dataclass  
 class Config:  
     gemini_key: str  
     openrouter_key: str  
     groq_key: str  
+    judge_key: str          # OpenRouter key reserved for the judge pool  
   
     @staticmethod  
     def from_env() -> "Config":  
@@ -257,8 +255,12 @@ class Config:
         if missing:  
             raise RuntimeError(  
                 f"Missing required environment variables: {', '.join(missing)}")  
+        # Judge key is optional: falls back to the generation key so existing  
+        # installs keep working until a second key is provided.  
         return Config(  
             gemini_key=os.environ["GEMINI_API_KEY"],  
             openrouter_key=os.environ["OPENROUTER_API_KEY"],  
             groq_key=os.environ["GROQ_API_KEY"],  
+            judge_key=os.environ.get("OPENROUTER_JUDGE_API_KEY")  
+                      or os.environ["OPENROUTER_API_KEY"],  
         )
