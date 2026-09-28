@@ -1,270 +1,205 @@
-# DizerCore-AI    
-# ----------------------------------------------------------------------------    
-# config.py — configuration, constants, model tiers, and shared predicates.    
-import logging    
-import os    
-from dataclasses import dataclass    
-from logging.handlers import RotatingFileHandler    
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# config.py — configuration, constants, model tiers, and shared predicates.  
+import logging  
+import os  
+from dataclasses import dataclass  
+from logging.handlers import RotatingFileHandler  
   
-# --------------------------------------------------------------------------- #    
-# Paths (all persistent data lives on the SSD, set via DIZER_DATA_DIR)    
-# --------------------------------------------------------------------------- #    
-DATA_DIR = os.environ.get("DIZER_DATA_DIR", "/mnt/dizerdata/dizercore")    
-os.makedirs(DATA_DIR, exist_ok=True)    
-USERS_DB = os.path.join(DATA_DIR, "dizer_users.db")    
-JOBS_DB = os.path.join(DATA_DIR, "dizer_jobs.db")    
-SESSIONS_DB = os.path.join(DATA_DIR, "dizer_sessions.db")    
-LOG_FILE = os.path.join(DATA_DIR, "dizercore.log")    
+# ---------------------------------------------------------------------------  
+# Paths (all persistent data lives on the SSD, set via DIZER_DATA_DIR)  
+# ---------------------------------------------------------------------------  
+DATA_DIR = os.environ.get("DIZER_DATA_DIR", "/mnt/dizerdata/dizercore")  
+os.makedirs(DATA_DIR, exist_ok=True)  
+USERS_DB = os.path.join(DATA_DIR, "dizer_users.db")  
+JOBS_DB = os.path.join(DATA_DIR, "dizer_jobs.db")  
+SESSIONS_DB = os.path.join(DATA_DIR, "dizer_sessions.db")  
+LOG_FILE = os.path.join(DATA_DIR, "dizercore.log")  
   
-# --------------------------------------------------------------------------- #    
-# Logging (console + rotating file; guarded so re-import never stacks handlers)    
-# --------------------------------------------------------------------------- #    
-logger = logging.getLogger("DizerCore")    
-logger.setLevel(logging.INFO)    
-if not logger.handlers:    
-    _fmt = logging.Formatter("%(asctime)s %(levelname)s [DizerCore] %(message)s")    
-    _sh = logging.StreamHandler()    
-    _sh.setFormatter(_fmt)    
-    logger.addHandler(_sh)    
-    _fh = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3)    
-    _fh.setFormatter(_fmt)    
-    logger.addHandler(_fh)    
+# ---------------------------------------------------------------------------  
+# Logging — INFO to console + rotating file on the SSD  
+# ---------------------------------------------------------------------------  
+logger = logging.getLogger("DizerCore")  
+if not logger.handlers:  
+    logger.setLevel(logging.INFO)  
+    _fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")  
+    _ch = logging.StreamHandler(); _ch.setFormatter(_fmt)  
+    _fh = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3)  
+    _fh.setFormatter(_fmt)  
+    logger.addHandler(_ch); logger.addHandler(_fh)  
   
-# --------------------------------------------------------------------------- #    
-# Limits    
-# --------------------------------------------------------------------------- #    
-MAX_PROMPT_CHARS = 200_000    
-MAX_FILE_BYTES = 5_000_000    
-MAX_TOTAL_FILE_BYTES = 20_000_000    
-MAX_CONCURRENT_JOBS = 2    
+VERSION = "1.0.0"  
+SERVICE_NAME = "dizercore"  
   
-# Cap for junk-retry rotation loops. Must be >= the length of the longest tier    
-# list below, otherwise fallback slugs past this index are never reached.    
-# Env-overridable so ops can tune it without a code change.    
-MAX_SAFETYWALL_TRIES = int(os.environ.get("MAX_SAFETYWALL_TRIES", "8"))    
+# ---------------------------------------------------------------------------  
+# Limits / tuning  
+# ---------------------------------------------------------------------------  
+MAX_PROMPT_CHARS = int(os.environ.get("MAX_PROMPT_CHARS", "20000"))  
+MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", "2000000"))        # 2 MB/file  
+MAX_TOTAL_FILE_BYTES = int(os.environ.get("MAX_TOTAL_FILE_BYTES", "8000000"))  
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "8192"))  
   
-# Seconds inserted before EVERY outbound model call so bursts of requests do    
-# not trip the free-tier per-minute limits. Override via the env var.    
-RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "6"))    
-
-# Seconds between judge calls. Judges run strictly in series (one candidate  
-# fully scored before the next), and each call sleeps JUDGE_DELAY first, so  
-# the judge key never gets a burst that trips its per-minute token limit.  
-JUDGE_DELAY = float(os.environ.get("JUDGE_DELAY", "5"))
-
-# Max output tokens per generation call. 1500 truncated large files (e.g. full    
-# SQL schemas), so raise it. Keep <= ~6000 because Groq's gpt-oss models are    
-# capped at 8K tokens/minute (prompt + output) and will 429 above that.    
-MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "6000"))    
+RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "2"))  
+# Serial delay BEFORE every judge call — keeps the dedicated judge key under  
+# free-tier per-minute limits.  
+JUDGE_DELAY = float(os.environ.get("JUDGE_DELAY", "5"))  
   
-# Groq gets its OWN, smaller output cap. Its gpt-oss / qwen models share an 8K    
-# tokens/MINUTE budget across prompt + output, so a large prompt plus a 6000-token    
-# response overshoots 8K and Groq returns 429/413. Keeping Groq's output at ~3000    
-# leaves room for a sizeable prompt while staying under 8K TPM. OpenRouter and    
-# Gemini are unaffected and keep the full MAX_OUTPUT_TOKENS. Env-overridable.    
-GROQ_MAX_OUTPUT_TOKENS = int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "3000"))    
+WEBUI_ADMIN_PASSWORD = os.environ.get("WEBUI_ADMIN_PASSWORD", "")  
   
-# --------------------------------------------------------------------------- #    
-# Inkling — kept for backward compatibility only.    
-#   Historically the sole confidence judge. Judging is now performed by the    
-#   JUDGE_MODELS pool (see below); INKLING_MODEL remains defined so any legacy    
-#   env/config references still resolve.    
-# --------------------------------------------------------------------------- #    
-INKLING_MODEL = os.environ.get("INKLING_MODEL", "thinkingmachines/inkling-small:free")    
+# ---------------------------------------------------------------------------  
+# Username / password rules (username min 5, password min 8)  
+# ---------------------------------------------------------------------------  
+MIN_USERNAME_LEN = 5  
+MIN_PASSWORD_LEN = 8  
+  
+# ---------------------------------------------------------------------------  
+# Model tiers — ONE tier per job picked by complexity.  
+# ---------------------------------------------------------------------------  
+def _list_from_env(var: str, default: list) -> list:  
+    raw = os.environ.get(var, "")  
+    if not raw.strip():  
+        return list(default)  
+    return [s.strip() for s in raw.split(",") if s.strip()]  
   
   
-# --------------------------------------------------------------------------- #    
-# Complexity tiers    
-#   The USER picks a complexity 1-5 in the dashboard (NOT an auto-classifier).    
-#   1-2 -> light, 3 -> normal, 4-5 -> heavy. If a level-3 run gives poor    
-#   output, bump to 4 next time. Each tier maps to a LIST of slugs that the    
-#   safetywall rotates through (first that returns usable output wins).    
-# --------------------------------------------------------------------------- #    
-def tier_for(level) -> str:    
-    """Map a 1-5 user complexity level to a tier name."""    
-    try:    
-        n = int(level)    
-    except (TypeError, ValueError):    
-        n = 3    
-    n = max(1, min(5, n))    
-    if n <= 2:    
-        return "light"    
-    if n == 3:    
-        return "normal"    
-    return "heavy"    
+def _tier_map(prefix: str, light: list, normal: list, heavy: list) -> dict:  
+    return {  
+        "light": _list_from_env(prefix + "_LIGHT", light),  
+        "normal": _list_from_env(prefix + "_NORMAL", normal),  
+        "heavy": _list_from_env(prefix + "_HEAVY", heavy),  
+    }  
   
   
-def _tier_map(var: str, light: list, normal: list, heavy: list) -> dict:    
-    """Per-provider tier map of slug LISTS. Each tier is overridable via a    
-    comma-separated {VAR}_{TIER} env var (e.g. OPENROUTER_MODEL_HEAVY=a,b)."""    
-    def _slugs(tier_name: str, default: list) -> list:    
-        raw = os.environ.get(f"{var}_{tier_name}")    
-        if raw:    
-            return [s.strip() for s in raw.split(",") if s.strip()]    
-        return default    
-    return {    
-        "light": _slugs("LIGHT", light),    
-        "normal": _slugs("NORMAL", normal),    
-        "heavy": _slugs("HEAVY", heavy),    
-    }    
+# OpenRouter — 3 slugs per tier. 'inkling' models may 403 ("agentic harnesses  
+# only") on a plain API key; the safetywall rotation tolerates that.  
+OPENROUTER_MODELS_BY_TIER = _tier_map(  
+    "OPENROUTER_MODEL",  
+    light=[  
+        "poolside/laguna-xs-2.1:free",  
+        "cohere/north-mini-code:free",  
+        "thinkingmachines/inkling-small:free",  
+    ],  
+    normal=[  
+        "poolside/laguna-s-2.1:free",  
+        "thinkingmachines/inkling:free",  
+        "qwen/qwen3.8-27b:free",  
+    ],  
+    heavy=[  
+        "nvidia/nemotron-3-super-120b-a12b:free",  
+        "nvidia/nemotron-3-ultra-550b-a55b:free",  
+        "google/gemma-4-31b-it:free",  
+    ],  
+)  
+  
+GROQ_MODELS_BY_TIER = _tier_map(  
+    "GROQ_MODEL",  
+    light=["llama-3.1-8b-instant"],  
+    normal=["llama-3.3-70b-versatile"],  
+    heavy=["llama-3.3-70b-versatile"],  
+)  
+  
+GEMINI_MODELS_BY_TIER = _tier_map(  
+    "GEMINI_MODEL",  
+    light=["gemini-2.0-flash-lite"],  
+    normal=["gemini-2.0-flash"],  
+    heavy=["gemini-2.5-pro"],  
+)  
+  
+# ---------------------------------------------------------------------------  
+# Judge pool — scores each candidate 0-100, FIRST usable score wins.  
+# Ordered best-first; pipeline rotates the start index per candidate.  
+# ---------------------------------------------------------------------------  
+JUDGE_MODELS = _list_from_env(  
+    "JUDGE_MODELS",  
+    [  
+        "google/gemma-4-26b-a4b-it:free",  
+        "dots-studio/dots-3-note-preview:free",  
+        "liquid/lfm-2.5-2.6b:free",  
+        # "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  # pending endpoint test  
+    ],  
+)  
+JUDGE_FALLBACK_MODELS = _list_from_env("JUDGE_FALLBACK_MODELS", [])  
+  
+# Legacy stage-toggle name kept for job.stages["inkling"].  
+INKLING_MODEL = "thinkingmachines/inkling-small:free"  
+  
+# ---------------------------------------------------------------------------  
+# Vision-capable slugs — accept image/PDF input. Used to route jobs that  
+# include binary attachments; text-only slugs get a note instead.  
+# ---------------------------------------------------------------------------  
+VISION_MODELS = {  
+    "google/gemma-4-31b-it:free",  
+    "google/gemma-4-26b-a4b-it:free",  
+    "dots-studio/dots-3-note-preview:free",  
+    # "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  # if endpoint test passes  
+}  
+  
+# ---------------------------------------------------------------------------  
+# Shared predicates  
+# ---------------------------------------------------------------------------  
+def tier_for(complexity: int) -> str:  
+    """Complexity 1-2 -> light, 3 -> normal, 4-5 -> heavy."""  
+    if complexity <= 2:  
+        return "light"  
+    if complexity <= 3:  
+        return "normal"  
+    return "heavy"  
   
   
-# NOTE: verify each slug is live on the provider's models page. A wrong/retired    
-# slug just errors and the safetywall rotates to the next one in the list.    
-# Each tier holds MULTIPLE coding slugs so a failed/junk model rotates to the    
-# next fallback within the same tier. Complexity 1-2 -> light, 3 -> normal,    
-# 4-5 -> heavy.    
-OPENROUTER_MODELS_BY_TIER = _tier_map(    
-    "OPENROUTER_MODEL",    
-    light=[    
-        "poolside/laguna-xs-2.1:free",    
-        "cohere/north-mini-code:free",    
-    ],    
-    normal=[    
-        "poolside/laguna-s-2.1:free",    
-        "google/gemma-4-26b-a4b-it:free",    
-    ],    
-    heavy=[    
-        "nvidia/nemotron-3-super-120b-a12b:free",    
-        "nvidia/nemotron-3-ultra-550b-a55b:free",    
-        "google/gemma-4-31b-it:free",    
-    ],    
-)    
-GROQ_MODELS_BY_TIER = _tier_map(    
-    "GROQ_MODEL",    
-    light=[    
-        "openai/gpt-oss-20b",    
-        "qwen/qwen3.6-27b",    
-        "groq/compound-mini",    
-    ],    
-    normal=[    
-        "openai/gpt-oss-120b",    
-        "qwen/qwen3.8-27b",    
-        "groq/compound",    
-    ],    
-    heavy=[    
-        "openai/gpt-oss-120b",    
-        "qwen/qwen3.8-27b",    
-        "groq/compound",    
-    ],    
-)    
-GEMINI_MODELS_BY_TIER = _tier_map(    
-    "GEMINI_MODEL",    
-    # Flash-Lite = 500 RPD / 15 RPM; full Flash = only 20 RPD / 5 RPM.    
-    # Lead every tier with Flash-Lite for headroom; full Flash is heavy-only,    
-    # and Flash-Lite sits under it as the fallback when the 20/day cap is hit.    
-    light=[    
-        "gemini-3.5-flash-lite",    
-        "gemini-3.1-flash-lite",    
-    ],    
-    normal=[    
-        "gemini-3.5-flash-lite",    
-        "gemini-3.1-flash-lite",    
-    ],    
-    heavy=[    
-        "gemini-3.8-flash",    
-        "gemini-3.6-flash",    
-        "gemini-3.5-flash-lite",    
-        "gemini-3.1-flash-lite",    
-    ],    
-)    
-  
-# --------------------------------------------------------------------------- #    
-# Judge models — score each agent's output 0-100 AFTER all stages run.    
-#   For each candidate the judges in JUDGE_MODELS are tried IN ORDER; a judge    
-#   that errors or returns non-numeric output is DISCARDED and the next slug    
-#   is tried, falling through to JUDGE_FALLBACK_MODELS if needed. The FIRST    
-#   usable 0-100 score wins (no averaging), and the agent (OpenRouter / Groq /    
-#   Gemini) with the highest score is reported as best. Only ONE judge call is    
-#   made per candidate in the normal case, keeping free-tier quota use low.    
-#   Judges authenticate with OPENROUTER_API_KEY_JUDGE — a SEPARATE OpenRouter    
-#   key from the generation key so judge quota never drains the AI key (and    
-#   vice versa). If unset, it falls back to OPENROUTER_API_KEY_CODER.    
-#   Both lists are comma-separated env-overridable.    
-# --------------------------------------------------------------------------- #    
-def _list_from_env(var: str, default: list) -> list:    
-    raw = os.environ.get(var)    
-    if raw:    
-        return [s.strip() for s in raw.split(",") if s.strip()]    
-    return default    
+def _is_unusable(text: str) -> bool:  
+    """Safetywall predicate: True if a generation output is junk."""  
+    t = (text or "").strip()  
+    if len(t) < 40:  
+        return True  
+    if t.startswith("["):  # provider error / skipped note  
+        return True  
+    return False  
   
   
-JUDGE_MODELS = _list_from_env(    
-    "JUDGE_MODELS",    
-    [    
-        "thinkingmachines/inkling:free",    
-        "thinkingmachines/inkling-small:free",    
-        "inclusionai/ling-3.0-flash-vl:free",    
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",    
-    ],    
-)    
-JUDGE_FALLBACK_MODELS = _list_from_env("JUDGE_FALLBACK_MODELS", [])    
-  
-# --------------------------------------------------------------------------- #    
-# Reasoning flag — EVERY slug used anywhere (generation tiers + judges +    
-# legacy Inkling) is called with "reasoning": {"enabled": True}. Built    
-# programmatically so new slugs above are automatically included.    
-# --------------------------------------------------------------------------- #    
-REASONING_MODELS = set()    
-for _tier_list in OPENROUTER_MODELS_BY_TIER.values():    
-    REASONING_MODELS.update(_tier_list)    
-REASONING_MODELS.update(JUDGE_MODELS)    
-REASONING_MODELS.update(JUDGE_FALLBACK_MODELS)    
-REASONING_MODELS.add(INKLING_MODEL)    
+# ---------------------------------------------------------------------------  
+# File-type routing for uploads  
+# ---------------------------------------------------------------------------  
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}  
+PDF_EXTS = {".pdf"}  
+DOCX_EXTS = {".docx"}  
+# Everything else is treated as text/code (incl. .sql .cpp .h .py .txt .md ...)  
   
   
-# --------------------------------------------------------------------------- #      
-# Deflection detection      
-# --------------------------------------------------------------------------- #      
-def _is_unusable(text: str) -> bool:      
-    """True if a stage produced nothing, or deflected instead of doing the work."""      
-    if not text or not text.strip():      
-        return True      
-    low = text.lower()      
-    deflections = (      
-        "paste the code", "please provide", "could you please",      
-        "share the code", "provide the code", "no code provided",      
-        "no code was provided", "i don't see any code", "once i have the",      
-        "as an ai", "i cannot assist", "user safety: safe",      
-    )      
-    return any(d in low for d in deflections)    
-   
-# --------------------------------------------------------------------------- #    
-# Web UI admin password    
-#   Required by POST /delete-account in routes.py — gates account deletion.    
-#   Set by install.sh (prompt 5) / dizercore.env. If unset, the delete endpoint    
-#   rejects every attempt (403) so a missing env var is never an open door.    
-# --------------------------------------------------------------------------- #    
-WEBUI_ADMIN_PASSWORD = os.environ.get("WEBUI_ADMIN_PASSWORD", "")    
-    
-# --------------------------------------------------------------------------- #    
-# API keys    
-#   OPENROUTER_API_KEY_CODER  -> generation calls (the AI agents)    
-#   OPENROUTER_API_KEY_JUDGE  -> judge pool calls only (separate quota so the    
-#                                judges can't rate-limit generation, and    
-#                                generation can't starve the judges). Optional:    
-#                                falls back to OPENROUTER_API_KEY_CODER if unset.    
-# --------------------------------------------------------------------------- #    
-@dataclass    
-class Config:    
-    gemini_key: str    
-    openrouter_key: str    
-    groq_key: str    
-    judge_key: str          # OpenRouter key reserved for the judge pool    
+def classify_upload(filename: str) -> str:  
+    """Return 'image' | 'pdf' | 'docx' | 'text' for a filename."""  
+    ext = os.path.splitext(filename or "")[1].lower()  
+    if ext in IMAGE_EXTS:  
+        return "image"  
+    if ext in PDF_EXTS:  
+        return "pdf"  
+    if ext in DOCX_EXTS:  
+        return "docx"  
+    return "text"  
   
-    @staticmethod    
-    def from_env() -> "Config":    
-        missing = [k for k in ("GEMINI_API_KEY", "OPENROUTER_API_KEY_CODER", "GROQ_API_KEY")    
-                   if not os.environ.get(k)]    
-        if missing:    
-            raise RuntimeError(    
-                f"Missing required environment variables: {', '.join(missing)}")    
-        # Judge key is optional: falls back to the generation key so existing    
-        # installs keep working until a second key is provided.    
-        return Config(    
-            gemini_key=os.environ["GEMINI_API_KEY"],    
-            openrouter_key=os.environ["OPENROUTER_API_KEY_CODER"],    
-            groq_key=os.environ["GROQ_API_KEY"],    
-            judge_key=os.environ.get("OPENROUTER_API_KEY_JUDGE")    
-                      or os.environ["OPENROUTER_API_KEY_CODER"],    
+  
+# ---------------------------------------------------------------------------  
+# Runtime config — loaded once at startup into runtime.cfg  
+# ---------------------------------------------------------------------------  
+@dataclass  
+class Config:  
+    gemini_key: str  
+    openrouter_key: str        # generation key (OPENROUTER_API_KEY_CODER)  
+    groq_key: str  
+    judge_key: str             # dedicated key for the judge pool  
+  
+    @staticmethod  
+    def from_env() -> "Config":  
+        missing = [k for k in ("GEMINI_API_KEY", "OPENROUTER_API_KEY_CODER", "GROQ_API_KEY")  
+                   if not os.environ.get(k)]  
+        if missing:  
+            raise RuntimeError(  
+                f"Missing required environment variables: {', '.join(missing)}")  
+        # Judge key is optional: falls back to the generation key so existing  
+        # installs keep working until a second key is provided.  
+        return Config(  
+            gemini_key=os.environ["GEMINI_API_KEY"],  
+            openrouter_key=os.environ["OPENROUTER_API_KEY_CODER"],  
+            groq_key=os.environ["GROQ_API_KEY"],  
+            judge_key=os.environ.get("OPENROUTER_API_KEY_JUDGE")  
+                      or os.environ["OPENROUTER_API_KEY_CODER"],  
         )
