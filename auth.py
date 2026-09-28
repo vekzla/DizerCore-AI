@@ -1,5 +1,6 @@
-# auth.py  
-# DizercoreAI — auth helpers (cookie-session) and auth-page HTML.  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# auth.py — auth helpers (cookie-session) and auth-page HTML.  
 #  
 # The user + session STORE (SQLite/PBKDF2) lives in db.py. This module used to  
 # carry its own duplicate copies of those functions; that duplication is removed  
