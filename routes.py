@@ -1,5 +1,6 @@
-# routes.py  
-# DizercoreAI — FastAPI route handlers.  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# routes.py — FastAPI route handlers.  
 # Auth routes (/login, /register, /logout), app routes (/, /run, /jobs,  
 # DELETE /jobs/{id}, /status, /stop, /version, /favicon.ico).  
 # Shared job/session state lives on runtime.* (populated at startup by lifespan).  
