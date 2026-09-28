@@ -157,7 +157,7 @@ _NON_REASONING = {
 }  
 REASONING_MODELS = (  
     _ALL_OPENROUTER_SLUGS | set(JUDGE_MODELS) | set(JUDGE_FALLBACK_MODELS)  
-) - _NON_REASONING  
+) - set(_NON_REASONING)
   
 # ---------------------------------------------------------------------------  
 # Shared predicates  
