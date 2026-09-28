@@ -47,6 +47,15 @@ MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", "2000000"))        # 2 MB/
 MAX_TOTAL_FILE_BYTES = int(os.environ.get("MAX_TOTAL_FILE_BYTES", "8000000"))  
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "8192"))  
   
+# Provider output caps (OpenRouter/Gemini use MAX_OUTPUT_TOKENS; Groq smaller).  
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "8192"))  
+GROQ_MAX_OUTPUT_TOKENS = int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "8192"))  
+  
+# Safetywall: retry a junk/failed generation, rotating to the next slug.  
+MAX_SAFETYWALL_TRIES = int(os.environ.get("MAX_SAFETYWALL_TRIES", "3"))  
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))  
+RETRY_DELAY = float(os.environ.get("RETRY_DELAY", "2"))  
+  
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", "2"))  
 # Serial delay BEFORE every judge call — keeps the dedicated judge key under  
 # free-tier per-minute limits.  
