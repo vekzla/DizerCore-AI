@@ -135,6 +135,31 @@ VISION_MODELS = {
 }  
   
 # ---------------------------------------------------------------------------  
+# Reasoning-capable slugs — get "reasoning": {"enabled": true} in the request  
+# body. Built automatically from the OpenRouter tiers + judge pool so any slug  
+# added above is picked up here (all current slugs are reasoning-capable).  
+# ---------------------------------------------------------------------------  
+def _env_flag(var: str) -> bool:  
+    """True if a comma-separated env var flag is set ('1','true','on','yes')."""  
+    return os.environ.get(var, "").strip().lower() in ("1", "true", "on", "yes")  
+  
+  
+_ALL_OPENROUTER_SLUGS = {  
+    slug  
+    for tier_slugs in OPENROUTER_MODELS_BY_TIER.values()  
+    for slug in tier_slugs  
+}  
+# Every OpenRouter slug we use supports reasoning; keep the set explicit so  
+# non-reasoning slugs added later can simply be omitted.  
+_NON_REASONING = {  
+    # add slugs here if you introduce a model that must NOT get the  
+    # reasoning flag — leave empty for now  
+}  
+REASONING_MODELS = (  
+    _ALL_OPENROUTER_SLUGS | set(JUDGE_MODELS) | set(JUDGE_FALLBACK_MODELS)  
+) - _NON_REASONING  
+  
+# ---------------------------------------------------------------------------  
 # Shared predicates  
 # ---------------------------------------------------------------------------  
 def tier_for(complexity: int) -> str:  
