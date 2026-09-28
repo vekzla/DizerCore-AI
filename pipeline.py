@@ -27,9 +27,15 @@ async def _run_agent(fn, enabled: bool, prompt: str, tier: str,
     return await fn(prompt, tier=tier, job=job, key=key)  
   
   
+def _is_skip(out: str) -> bool:  
+    """True if the output is a skip/junk marker rather than real code —  
+    don't spend a judge call on it."""  
+    return (out or "").startswith("[")  
+  
+  
 async def _judge_candidate(job, name, key, out, ran, lock, start_index):  
     """Judge one finished candidate under the serial judge lock."""  
-    if not ran:  
+    if not ran or _is_skip(out):  
         job.steps[key + "_conf"] = ""  
         job.steps[key + "_judge_comments"] = ""  
         return None  
@@ -48,7 +54,8 @@ async def _judge_candidate(job, name, key, out, ran, lock, start_index):
 async def _agent_then_judge(job, fn, enabled, prompt, tier, skip_msg,  
                             name, key, judge_start, lock, scores):  
     """Generate -> write slot -> judge immediately (serialized by lock)."""  
-    out, model = await _run_agent(fn, enabled, prompt, tier, skip_msg, job, key)  
+    out, model = await _run_agent(fn, enabled, prompt, tier, skip_msg,  
+                                  job, key)  
     if job.steps.get(key) != out:   # streamed deltas may already be there  
         job.steps[key] = out  
     job.steps[key + "_model"] = model  
@@ -98,7 +105,9 @@ async def run_job(job_id: str):
         scores = []  
         last = max(len(JUDGE_MODELS) - 1, 0)  
   
-        await asyncio.gather(  
+        # return_exceptions=True: one agent blowing up must NOT cancel the  
+        # other two mid-write. Failed agents land as exceptions in `results`.  
+        results = await asyncio.gather(  
             _agent_then_judge(job, openrouter_generate,  
                               job.stages.get("openrouter", True),  
                               gen_prompt, tier,  
@@ -114,7 +123,12 @@ async def run_job(job_id: str):
                               gen_prompt, tier,  
                               "[Gemini skipped]\n\n" + job.prompt,  
                               "Gemini", "final", 1, lock, scores),  
+            return_exceptions=True,  
         )  
+        for r in results:  
+            if isinstance(r, Exception) and not isinstance(  
+                    r, asyncio.CancelledError):  
+                logger.error("[Job %s] agent task failed: %s", job.id, r)  
   
         if job.stages.get("inkling", True):  
             _pick_winner(job, scores)  
@@ -126,7 +140,8 @@ async def run_job(job_id: str):
                 if conf2:  
                     job.steps["summary_conf"] = conf2  
             if not scores:  
-                job.steps["summary"] = "The judge pool could not score any agent."  
+                job.steps["summary"] = (  
+                    "The judge pool could not score any agent.")  
                 job.steps["summary_conf"] = ""  
             job.steps["summary_status"] = "done"  
             job.touch(); save_job(job)  
