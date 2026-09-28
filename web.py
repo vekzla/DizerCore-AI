@@ -1,5 +1,6 @@
-# web.py  
-# DizerCoreAI — dashboard HTML/JS (served by routes.py at "/").  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# web.py — dashboard HTML/JS (served by routes.py at "/").  
 # Exposes DASHBOARD_HTML only. Logo is served from /static/dizercore.png  
 # (mount StaticFiles in dizercoreai.py). Login/Register HTML live in auth.py.  
   
