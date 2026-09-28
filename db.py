@@ -1,6 +1,8 @@
-# db.py  
-# SQLite persistence for DizercoreAI: users, sessions, and jobs.  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# db.py — SQLite persistence: users, sessions, and jobs.  
 # Pure stdlib (sqlite3 + hashlib/hmac) — no external DB dependency.  
+# Single source of truth for the user/session store (auth.py re-exports these).  
 import hashlib  
 import hmac  
 import json  
