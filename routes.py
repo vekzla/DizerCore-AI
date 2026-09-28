@@ -148,7 +148,16 @@ async def index(request: Request):
   
 @router.get("/version")  
 async def version():  
-    return JSONResponse({"version": get_version()})  
+    from version import get_info, check_remote  
+    info = get_info()  
+    remote = await check_remote()  
+    return JSONResponse({  
+        "version": info["sha"],  
+        "installed_at": info["installed_at"],  
+        "repo": info["repo"],  
+        "latest": remote,  
+        "update_available": bool(remote) and remote != info["sha"],  
+    })
   
   
 def _docx_text(raw: bytes) -> str:  
