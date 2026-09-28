@@ -1,255 +1,212 @@
 # DizerCore-AI  
 # ----------------------------------------------------------------------------  
-# routes.py — FastAPI route handlers.  
-# Auth routes (/login, /register, /logout, /delete-account), app routes  
-# (/, /run, /jobs, DELETE /jobs/{id}, /status, /stop, /version, /favicon.ico).  
-# Shared job/session state lives on runtime.* (populated at startup by lifespan).  
-import asyncio  
+# db.py — SQLite persistence for DizerCoreAI: users, sessions, and jobs.  
+# Pure stdlib (sqlite3 + hashlib/hmac) — no external DB dependency.  
+import hashlib  
 import hmac  
+import json  
 import secrets  
-import uuid  
+import time  
+from dataclasses import dataclass, field, asdict  
+from enum import Enum  
   
-from fastapi import (  
-    APIRouter, Form, File, UploadFile, HTTPException, Request, Response,  
-)  
-from fastapi.responses import (  
-    HTMLResponse, JSONResponse, RedirectResponse,  
-)  
-  
-import runtime  
-from config import (  
-    MAX_PROMPT_CHARS, MAX_FILE_BYTES, MAX_TOTAL_FILE_BYTES, logger,  
-    WEBUI_ADMIN_PASSWORD,  
-)  
-from db import (  
-    State, Job,  
-    save_job, delete_job_row, save_session, delete_session,  
-    list_users, delete_user, delete_user_sessions, delete_user_jobs,  
-)  
-from auth import (  
-    create_user, verify_user, current_user,  
-    LOGIN_HTML, REGISTER_HTML, delete_account_html,  
-)  
-from pipeline import run_pipeline  
-from web import DASHBOARD_HTML  
-from version import get_version  
-  
-router = APIRouter()  
+from config import USERS_DB, SESSIONS_DB, JOBS_DB  
+import sqlite3  
   
   
 # ---------------------------------------------------------------------------  
-# Routes: auth  
+# User store (SQLite + PBKDF2 salted hashing, stdlib only)  
 # ---------------------------------------------------------------------------  
-@router.get("/login", response_class=HTMLResponse)  
-async def login_page() -> str:  
-    return LOGIN_HTML  
+def init_users_db() -> None:  
+    with sqlite3.connect(USERS_DB) as c:  
+        c.execute("""CREATE TABLE IF NOT EXISTS users (  
+            username TEXT PRIMARY KEY,  
+            salt TEXT NOT NULL,  
+            pwhash TEXT NOT NULL,  
+            created_at REAL NOT NULL)""")  
   
   
-@router.post("/login")  
-async def login(username: str = Form(...), password: str = Form(...)):  
-    if not verify_user(username.strip(), password):  
-        raise HTTPException(status_code=401, detail="Invalid username or password.")  
-    token = secrets.token_urlsafe(32)  
-    runtime.SESSIONS[token] = username.strip()  
-    save_session(token, username.strip())  
-    resp = RedirectResponse("/", status_code=303)  
-    resp.set_cookie("dizer_session", token, httponly=True, samesite="lax")  
-    return resp  
+def _hash_pw(password: str, salt: bytes) -> str:  
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000).hex()  
   
   
-@router.get("/register", response_class=HTMLResponse)  
-async def register_page() -> str:  
-    return REGISTER_HTML  
-  
-  
-@router.post("/register")  
-async def register(username: str = Form(...), password: str = Form(...)):  
-    username = username.strip()  
-    if len(username) < 5 or len(password) < 8:  
-        raise HTTPException(status_code=400,  
-                            detail="Username min 5 chars, password min 8 chars.")  
+def create_user(username: str, password: str) -> None:  
+    salt = secrets.token_bytes(16)  
+    pwhash = _hash_pw(password, salt)  
     try:  
-        create_user(username, password)  
-    except ValueError as e:  
-        raise HTTPException(status_code=400, detail=str(e))  
-    logger.info("New user registered: %s", username)  
-    return RedirectResponse("/login", status_code=303)  
+        with sqlite3.connect(USERS_DB) as c:  
+            c.execute("INSERT INTO users VALUES (?,?,?,?)",  
+                      (username, salt.hex(), pwhash, time.time()))  
+    except sqlite3.IntegrityError:  
+        raise ValueError("Username already exists.")  
   
   
-@router.post("/logout")  
-async def logout(request: Request):  
-    token = request.cookies.get("dizer_session")  
-    runtime.SESSIONS.pop(token or "", None)  
-    delete_session(token or "")  
-    resp = RedirectResponse("/login", status_code=303)  
-    resp.delete_cookie("dizer_session")  
-    return resp  
+def verify_user(username: str, password: str) -> bool:  
+    with sqlite3.connect(USERS_DB) as c:  
+        row = c.execute("SELECT salt, pwhash FROM users WHERE username=?",  
+                        (username,)).fetchone()  
+    if not row:  
+        return False  
+    salt_hex, pwhash = row  
+    candidate = _hash_pw(password, bytes.fromhex(salt_hex))  
+    return hmac.compare_digest(candidate, pwhash)  
   
   
-# ---------------------------------------------------------------------------  
-# Routes: account deletion (admin-gated, no login required to reach the page)  
-# ---------------------------------------------------------------------------  
-@router.get("/delete-account", response_class=HTMLResponse)  
-async def delete_account_page() -> str:  
-    return delete_account_html()  
+def list_users() -> list:  
+    """All registered usernames, alphabetical — feeds the delete-account dropdown."""  
+    with sqlite3.connect(USERS_DB) as c:  
+        return [r[0] for r in c.execute(  
+            "SELECT username FROM users ORDER BY username").fetchall()]  
   
   
-@router.post("/delete-account")  
-async def delete_account(username: str = Form(...),  
-                         admin_password: str = Form(...)):  
-    # The install-time admin password is the ONLY gate — deleting is  
-    # irreversible, so a wrong/empty password or unset env var refuses outright.  
-    if not WEBUI_ADMIN_PASSWORD or not hmac.compare_digest(  
-            admin_password.encode(), WEBUI_ADMIN_PASSWORD.encode()):  
-        raise HTTPException(status_code=403, detail="Invalid admin password.")  
-    username = username.strip()  
-    if username not in list_users():  
-        raise HTTPException(status_code=404, detail="User not found.")  
-  
-    # Cancel and drop the user's in-memory jobs, then purge all DB rows.  
-    for jid, job in list(runtime.JOBS.items()):  
-        if job.owner == username:  
-            task = runtime.TASKS.get(jid)  
-            if task and not task.done():  
-                task.cancel()  
-            runtime.JOBS.pop(jid, None)  
-            runtime.TASKS.pop(jid, None)  
-    delete_user_jobs(username)  
-    delete_user_sessions(username)  
-    for tok, owner in list(runtime.SESSIONS.items()):  
-        if owner == username:  
-            runtime.SESSIONS.pop(tok, None)  
-    delete_user(username)  
-    logger.info("Admin deleted account: %s", username)  
-    return RedirectResponse("/login", status_code=303)  
+def delete_user(username: str) -> None:  
+    with sqlite3.connect(USERS_DB) as c:  
+        c.execute("DELETE FROM users WHERE username=?", (username,))  
   
   
 # ---------------------------------------------------------------------------  
-# Routes: app  
+# Session store (SQLite so logins survive service restarts)  
 # ---------------------------------------------------------------------------  
-@router.get("/", response_class=HTMLResponse)  
-async def index(request: Request):  
-    token = request.cookies.get("dizer_session")  
-    if not runtime.SESSIONS.get(token or ""):  
-        return RedirectResponse("/login", status_code=303)  
-    return HTMLResponse(DASHBOARD_HTML)  
+def init_sessions_db() -> None:  
+    with sqlite3.connect(SESSIONS_DB) as c:  
+        c.execute("""CREATE TABLE IF NOT EXISTS sessions (  
+            token TEXT PRIMARY KEY,  
+            username TEXT NOT NULL,  
+            created_at REAL NOT NULL)""")  
   
   
-@router.get("/version")  
-async def version():  
-    return JSONResponse({"version": get_version()})  
+def load_sessions() -> dict:  
+    out: dict = {}  
+    with sqlite3.connect(SESSIONS_DB) as c:  
+        for token, username in c.execute("SELECT token, username FROM sessions"):  
+            out[token] = username  
+    return out  
   
   
-@router.post("/run")  
-async def run(  
-    request: Request,  
-    prompt: str = Form(...),  
-    complexity: int = Form(3),  
-    openrouter: str = Form("on"),  
-    groq: str = Form("on"),  
-    gemini: str = Form("on"),  
-    inkling: str = Form("on"),  
-    files: list[UploadFile] = File(default=[]),  
-):  
-    user = current_user(request)  
-    prompt = prompt.strip()  
-    if not prompt:  
-        raise HTTPException(status_code=400, detail="Prompt is required.")  
-  
-    # Clamp complexity to the agreed 1-5 range (1-2 light, 3 normal, 4-5 heavy).  
-    try:  
-        complexity = int(complexity)  
-    except (TypeError, ValueError):  
-        complexity = 3  
-    complexity = max(1, min(5, complexity))  
-  
-    # Fold uploaded text files into the prompt as context.  
-    total = 0  
-    for f in files:  
-        raw = await f.read()  
-        if not raw:  
-            continue  
-        total += len(raw)  
-        if len(raw) > MAX_FILE_BYTES or total > MAX_TOTAL_FILE_BYTES:  
-            raise HTTPException(status_code=400, detail="Uploaded files too large.")  
-        try:  
-            text = raw.decode("utf-8")  
-        except UnicodeDecodeError:  
-            prompt += f"\n\n[Attached binary file: {f.filename} ({len(raw)} bytes)]"  
-            continue  
-        prompt += f"\n\n--- FILE: {f.filename} ---\n{text}"  
-  
-    if len(prompt) > MAX_PROMPT_CHARS:  
-        raise HTTPException(status_code=400, detail="Prompt (with files) too large.")  
-  
-    job = Job(  
-        id=uuid.uuid4().hex[:12],  
-        owner=user,  
-        prompt=prompt,  
-        complexity=complexity,  
-        stages={"openrouter": openrouter == "on",  
-                "groq": groq == "on",  
-                "gemini": gemini == "on",  
-                "inkling": inkling == "on"},  
-    )  
-    runtime.JOBS[job.id] = job  
-    save_job(job)  
-    runtime.TASKS[job.id] = asyncio.create_task(run_pipeline(job))  
-    return JSONResponse({"job_id": job.id})  
+def save_session(token: str, username: str) -> None:  
+    with sqlite3.connect(SESSIONS_DB) as c:  
+        c.execute("INSERT OR REPLACE INTO sessions VALUES (?,?,?)",  
+                  (token, username, time.time()))  
   
   
-@router.get("/jobs")  
-async def jobs(request: Request):  
-    user = current_user(request)  
-    mine = [j for j in runtime.JOBS.values() if j.owner == user]  
-    mine.sort(key=lambda j: j.created_at, reverse=True)  
-    return JSONResponse([  
-        {"id": j.id, "state": j.state, "created_at": j.created_at,  
-         "title": (j.prompt[:60] + ("…" if len(j.prompt) > 60 else ""))}  
-        for j in mine  
-    ])  
+def delete_session(token: str) -> None:  
+    with sqlite3.connect(SESSIONS_DB) as c:  
+        c.execute("DELETE FROM sessions WHERE token=?", (token,))  
   
   
-@router.delete("/jobs/{job_id}")  
-async def delete_job(job_id: str, request: Request):  
-    user = current_user(request)  
-    job = runtime.JOBS.get(job_id)  
-    if not job or job.owner != user:  
-        raise HTTPException(status_code=404, detail="Job not found.")  
-    task = runtime.TASKS.get(job_id)  
-    if task and not task.done():  
-        task.cancel()  
-    runtime.JOBS.pop(job_id, None)  
-    runtime.TASKS.pop(job_id, None)  
-    delete_job_row(job_id)  
-    return JSONResponse({"ok": True})  
+def delete_user_sessions(username: str) -> None:  
+    """Delete every session belonging to a user — used by account deletion."""  
+    with sqlite3.connect(SESSIONS_DB) as c:  
+        c.execute("DELETE FROM sessions WHERE username=?", (username,))  
   
   
-@router.get("/status/{job_id}")  
-async def status(job_id: str, request: Request):  
-    user = current_user(request)  
-    job = runtime.JOBS.get(job_id)  
-    if not job or job.owner != user:  
-        raise HTTPException(status_code=404, detail="Job not found.")  
-    return JSONResponse({  
-        "id": job.id, "state": job.state, "error": job.error,  
-        "complexity": job.complexity,  
-        "steps": job.steps, "updated_at": job.updated_at,  
-    })  
+# ---------------------------------------------------------------------------  
+# Job store (SQLite persistence so history survives restarts)  
+# ---------------------------------------------------------------------------  
+class State(str, Enum):  
+    QUEUED = "queued"  
+    RUNNING = "running"  
+    DONE = "done"  
+    FAILED = "failed"  
+    CANCELLED = "cancelled"  
   
   
-@router.post("/stop/{job_id}")  
-async def stop(job_id: str, request: Request):  
-    user = current_user(request)  
-    job = runtime.JOBS.get(job_id)  
-    if not job or job.owner != user:  
-        raise HTTPException(status_code=404, detail="Job not found.")  
-    task = runtime.TASKS.get(job_id)  
-    if task and not task.done():  
-        task.cancel()  
-    return JSONResponse({"ok": True})  
+def _default_steps() -> dict:  
+    # Per stage we keep the text output plus which model produced it, a  
+    # 0-100 confidence score (scored by the judge pool, not the stage's own  
+    # model), and the judge's detailed comments explaining that score.  
+    # Blank strings render as empty panels in the UI.  
+    # `*_status` is a live progress flag ("working"/"done"/"") that the  
+    # dashboard animates into a "working…" spinner while the stage runs.  
+    # `*_thinking` holds the model's reasoning/thinking tokens, streamed  
+    # live into a gray sub-block in the UI while the stage runs.  
+    # `summary` / `summary_conf` hold the judge pool's "best is X (NN%)" line  
+    # plus the winning judge's comments.  
+    return {  
+        "generate": "", "generate_model": "", "generate_conf": "",  
+        "generate_status": "", "generate_judge_comments": "",  
+        "generate_thinking": "",  
+        "verify": "",   "verify_model": "",   "verify_conf": "",  
+        "verify_status": "",   "verify_judge_comments": "",  
+        "verify_thinking": "",  
+        "final": "",    "final_model": "",    "final_conf": "",  
+        "final_status": "",    "final_judge_comments": "",  
+        "final_thinking": "",  
+        "summary": "",  "summary_conf": "",   "summary_status": "",  
+    }  
   
   
-@router.get("/favicon.ico")  
-async def favicon() -> Response:  
-    return Response(status_code=204)
+def _default_stages() -> dict:  
+    # openrouter/groq/gemini are the three generator stages; inkling is the  
+    # judge pool (checked on by default in the dashboard).  
+    return {"openrouter": True, "groq": True, "gemini": True, "inkling": True}  
+  
+  
+@dataclass  
+class Job:  
+    id: str  
+    owner: str  
+    prompt: str  
+    complexity: int = 3          # 1-2 light, 3 normal, 4-5 heavy (user-set)  
+    state: str = State.QUEUED  
+    error: str = ""  
+    steps: dict = field(default_factory=_default_steps)  
+    stages: dict = field(default_factory=_default_stages)  
+    # Metadata ONLY for uploaded files: [{"name": ..., "kind": "image|pdf|text",  
+    # "mime": ...}]. NEVER store raw bytes here — save_job() json.dumps()s the  
+    # whole dataclass and bytes are not JSON-serializable. Raw bytes live in  
+    # runtime.ATTACH[job_id] for the lifetime of the process.  
+    attachments: list = field(default_factory=list)  
+    created_at: float = field(default_factory=time.time)  
+    updated_at: float = field(default_factory=time.time)  
+  
+    def touch(self) -> None:  
+        self.updated_at = time.time()  
+  
+  
+def init_jobs_db() -> None:  
+    with sqlite3.connect(JOBS_DB) as c:  
+        c.execute("""CREATE TABLE IF NOT EXISTS jobs (  
+            id TEXT PRIMARY KEY,  
+            owner TEXT NOT NULL,  
+            data TEXT NOT NULL,  
+            updated_at REAL NOT NULL)""")  
+  
+  
+def save_job(job: Job) -> None:  
+    with sqlite3.connect(JOBS_DB) as c:  
+        c.execute("INSERT OR REPLACE INTO jobs VALUES (?,?,?,?)",  
+                  (job.id, job.owner, json.dumps(asdict(job)), job.updated_at))  
+  
+  
+def delete_job_row(job_id: str) -> None:  
+    with sqlite3.connect(JOBS_DB) as c:  
+        c.execute("DELETE FROM jobs WHERE id=?", (job_id,))  
+  
+  
+def delete_user_jobs(username: str) -> None:  
+    """Delete every job owned by a user — used by account deletion."""  
+    with sqlite3.connect(JOBS_DB) as c:  
+        c.execute("DELETE FROM jobs WHERE owner=?", (username,))  
+  
+  
+def load_jobs() -> dict:  
+    out: dict = {}  
+    with sqlite3.connect(JOBS_DB) as c:  
+        for jid, data in c.execute("SELECT id, data FROM jobs"):  
+            d = json.loads(data)  
+            # Any job still marked running at load time crashed with the server.  
+            if d.get("state") == State.RUNNING:  
+                d["state"] = State.FAILED  
+                d["error"] = "Server restarted while job was running."  
+            # Backfill new fields for jobs saved by an older version.  
+            d.setdefault("complexity", 3)  
+            d.setdefault("attachments", [])  
+            merged_steps = _default_steps()  
+            merged_steps.update(d.get("steps", {}))  
+            d["steps"] = merged_steps  
+            merged_stages = _default_stages()  
+            merged_stages.update(d.get("stages", {}))  
+            d["stages"] = merged_stages  
+            out[jid] = Job(**d)  
+    return out
