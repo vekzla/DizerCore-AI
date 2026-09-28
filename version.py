@@ -1,5 +1,6 @@
-# version.py  
-# DizercoreAI — reports which version the Pi is running.  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# version.py — reports which version the Pi is running.  
 # install.sh writes a short git SHA into a VERSION file at install time;  
 # this reads it, falling back to a live git call, then to "unknown".  
 import os  
