@@ -83,6 +83,7 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   <div style="margin:10px 0;">  
     <button onclick="run()">Run</button>  
     <button class="ghost" onclick="stopJob()">Stop</button>  
+    <button class="ghost" onclick="clearInput()">Clear</button>  
   </div>  
   
   <div class="head"><h3>OpenRouter <span id="generate_status" class="status"></span></h3>  
@@ -197,6 +198,15 @@ async function run(){
     th.textContent=''; th.style.display='none';  
     setStatus(k,'working'); }  
   openStream(jobId); armPoll(); poll();  
+}  
+function clearInput(){  
+  const p=document.getElementById('prompt');  
+  p.value=''; p.focus();  
+  const f=document.getElementById('files');  
+  f.value='';  
+  document.getElementById('filelist').textContent='';  
+  const t=document.getElementById('title');  
+  if(t) t.value='';  
 }  
 async function stopJob(){  
   // If no job selected, fall back to the newest running job so Stop still  
