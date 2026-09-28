@@ -202,7 +202,7 @@ async function poll(){
     const txt=steps[k]||'';  
     document.getElementById(k).textContent=txt;  
     document.getElementById(k+'_meta').textContent=  
-      meta(steps[k+'_model'],steps[k+'_confidence'],steps[k+'_judge_comments']);  
+      meta(steps[k+'_model'],steps[k+'_conf'],steps[k+'_judge_comments']);  
     const st=steps[k+'_status'];  
     if(st==='working') setStatus(k,'working');  
     else if(txt||st==='done') setStatus(k,'done');  
