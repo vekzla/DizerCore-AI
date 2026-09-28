@@ -11,4 +11,5 @@ job_semaphore = None  # asyncio.Semaphore(MAX_CONCURRENT_JOBS)
   
 JOBS = {}      # job_id -> db.Job  
 TASKS = {}     # job_id -> asyncio.Task (for cancellation)  
-SESSIONS = {}  # cookie token -> username
+SESSIONS = {}  # cookie token -> username  
+ATTACH = {}    # job_id -> {name: bytes} for image/pdf uploads (NOT persisted)
