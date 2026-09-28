@@ -109,7 +109,7 @@ Falls back to a live `git rev-parse` if `VERSION` is missing.
   
 ```bash  
 
-curl -fsSL https://raw.githubusercontent.com/vekzla/DizerCore-AI/main/install.sh | tr -d '\r' | bash
+curl -fsSL "https://raw.githubusercontent.com/vekzla/DizerCore-AI/main/install.sh?nocache=$(date +%s)" | tr -d '\r' | bash
 
 ```
 Auto-detects SSDs, applies the UAS quirk hotfix (reboot once, re-run), formats
