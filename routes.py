@@ -2,10 +2,12 @@
 # ----------------------------------------------------------------------------  
 # routes.py — FastAPI route handlers.  
 # Auth routes (/login, /register, /logout, /delete-account), app routes  
-# (/, /run, /jobs, DELETE /jobs/{id}, /status, /stop, /version, /favicon.ico).  
-# Shared job/session state lives on runtime.* (populated at startup by lifespan).  
+# (/, /run, /jobs, DELETE /jobs/{id}, /status, /status/stream, /stop,  
+# /version, /favicon.ico). Shared job/session state lives on runtime.*  
+# (populated at startup by lifespan).  
 import asyncio  
 import hmac  
+import json  
 import secrets  
 import uuid  
   
@@ -13,7 +15,7 @@ from fastapi import (
     APIRouter, Form, File, UploadFile, HTTPException, Request, Response,  
 )  
 from fastapi.responses import (  
-    HTMLResponse, JSONResponse, RedirectResponse,  
+    HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse,  
 )  
   
 import runtime  
@@ -225,29 +227,87 @@ async def delete_job(job_id: str, request: Request):
     return JSONResponse({"ok": True})  
   
   
+def _job_payload(job: Job) -> dict:  
+    return {  
+        "id": job.id, "state": job.state, "error": job.error,  
+        "complexity": job.complexity,  
+        "steps": job.steps, "updated_at": job.updated_at,  
+    }  
+  
+  
 @router.get("/status/{job_id}")  
 async def status(job_id: str, request: Request):  
     user = current_user(request)  
     job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
         raise HTTPException(status_code=404, detail="Job not found.")  
-    return JSONResponse({  
-        "id": job.id, "state": job.state, "error": job.error,  
-        "complexity": job.complexity,  
-        "steps": job.steps, "updated_at": job.updated_at,  
-    })  
+    return JSONResponse(_job_payload(job))  
   
   
-@router.post("/stop/{job_id}")  
-async def stop(job_id: str, request: Request):  
+@router.get("/status/stream/{job_id}")  
+async def status_stream(job_id: str, request: Request):  
+    """SSE stream of the job payload — pushes on every state change and ends  
+    when the job reaches a terminal state. Frontend may also poll /status."""  
     user = current_user(request)  
+    job = runtime.JOBS.get(job_id)  
+    if not job or job.owner != user:  
+        raise HTTPException(status_code=404, detail="Job not found.")  
+  
+    async def events():  
+        last = None  
+        while True:  
+            if await request.is_disconnected():  
+                return  
+            payload = _job_payload(job)  
+            blob = json.dumps(payload, default=str)  
+            if blob != last:  
+                last = blob  
+                yield f"data: {blob}\n\n"  
+            if job.state in (State.DONE, State.FAILED, State.CANCELLED):  
+                return  
+            await asyncio.sleep(0.5)  
+  
+    return StreamingResponse(events(), media_type="text/event-stream")  
+  
+  
+def _cancel_job(job_id: str, user: str):  
     job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
         raise HTTPException(status_code=404, detail="Job not found.")  
     task = runtime.TASKS.get(job_id)  
     if task and not task.done():  
         task.cancel()  
+        logger.info("[Job %s] cancel requested by %s.", job_id, user)  
+    else:  
+        # Task already gone (or never registered) — still mark the job so the  
+        # UI doesn't sit on a stale 'running' state.  
+        if job.state not in (State.DONE, State.FAILED, State.CANCELLED):  
+            job.state = State.CANCELLED  
+            job.error = "Cancelled by user."  
+            job.touch()  
+            save_job(job)  
     return JSONResponse({"ok": True})  
+  
+  
+@router.post("/stop/{job_id}")  
+async def stop(job_id: str, request: Request):  
+    return _cancel_job(job_id, current_user(request))  
+  
+  
+@router.get("/stop/{job_id}")  
+async def stop_get(job_id: str, request: Request):  
+    # Some frontends fire a plain GET/navigation for stop — accept it too.  
+    return _cancel_job(job_id, current_user(request))  
+  
+  
+@router.post("/stop")  
+async def stop_query(request: Request, job_id: str = Form("")):  
+    # Fallback for frontends that POST the id as a form/query field.  
+    jid = job_id or request.query_params.get("job_id", "") \  
+        or request.query_params.get("id", "")  
+    if not jid:  
+        raise HTTPException(status_code=400, detail="job_id required.")  
+    return _cancel_job(jid, current_user(request))  
   
   
 @router.get("/favicon.ico")  
