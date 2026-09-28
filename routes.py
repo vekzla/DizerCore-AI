@@ -303,8 +303,7 @@ async def stop_get(job_id: str, request: Request):
 @router.post("/stop")  
 async def stop_query(request: Request, job_id: str = Form("")):  
     # Fallback for frontends that POST the id as a form/query field.  
-    jid = job_id or request.query_params.get("job_id", "") \  
-        or request.query_params.get("id", "")  
+    jid = job_id or request.query_params.get("job_id", "") or request.query_params.get("id", "")
     if not jid:  
         raise HTTPException(status_code=400, detail="job_id required.")  
     return _cancel_job(jid, current_user(request))  
