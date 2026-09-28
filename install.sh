@@ -53,6 +53,7 @@ pick_ssd() {
   root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
   # Root partition's parent disk (mmcblk0 for SD boot, sda for USB boot).  
   root_disk="$(lsblk -n -o PKNAME "$root_src" 2>/dev/null || true)"  
+  root_disk="$(basename "$root_disk")"  
   [ -z "$root_disk" ] && root_disk="$(basename "$root_src" | sed 's/p*[0-9]*$//')"  
   
   mapfile -t ROWS < <(lsblk -lnpo NAME,TYPE,FSTYPE,SIZE,PKNAME,MOUNTPOINT 2>/dev/null)  
@@ -61,7 +62,7 @@ pick_ssd() {
   local dev type fstype size pk mnt  
   while read -r dev type fstype size pk mnt; do  
     [ "$type" = "part" ] || continue  
-    [ "$pk" = "$root_disk" ] && continue              # skip boot disk  
+    [ "$(basename "$pk")" = "$root_disk" ] && continue  # skip boot disk  
     [ "$mnt" = "$DATA_MOUNT" ] && continue            # already our mount  
     case "$dev" in /dev/mmcblk*|/dev/loop*|/dev/zram*) continue ;; esac  
     CANDS+=("$dev|$size|${fstype:-none}|$pk")  
@@ -85,7 +86,7 @@ pick_ssd() {
     read -r -p "Which partition is the DizerCore SSD? [1-${#CANDS[@]}] " choice </dev/tty || true  
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#CANDS[@]}" ]; then  
       IFS='|' read -r SSD_DEV _sz _fs SSD_DISK <<<"${CANDS[$((choice - 1))]}"  
-      SSD_DISK="/dev/${SSD_DISK}"  
+      SSD_DISK="/dev/$(basename "$SSD_DISK")"  
       return 0  
     fi  
     warn "Enter a number between 1 and ${#CANDS[@]}."  
