@@ -4,9 +4,10 @@
 # install.sh — one-shot installer for Raspberry Pi 5 (headless).  
 # Auto-detects plugged-in SSDs (excludes the SD card / boot disk), lets  
 # the user pick the target, applies the UAS quirk hotfix automatically,  
-# formats ext4 ONLY if needed (with an explicit erase warning), mounts  
-# by UUID at /mnt/dizerdata, writes the env file (incl. optional  
-# dedicated OpenRouter JUDGE key), installs the systemd service.  
+# then ALWAYS wipes the picked disk clean (new GPT label + single ext4  
+# partition) after a typed ERASE confirmation. Mounts by UUID at  
+# /mnt/dizerdata, writes the env file (incl. optional dedicated  
+# OpenRouter JUDGE key), installs the systemd service.  
 # ==================================================================  
 set -Eeuo pipefail  
   
@@ -15,152 +16,230 @@ BRANCH="main"
 APP_NAME="DizerCoreAI"  
 ENTRYPOINT="dizercoreai.py"  
 SERVICE_NAME="dizercore"  
-APP_DIR="${HOME}/DizerCore-AI"  
-DATA_MOUNT="/mnt/dizerdata"  
 PORT="8000"  
   
-# ---------- pretty output ----------  
-banner(){ echo; echo "============================================================"; echo " $*"; echo "============================================================"; }  
-ok(){     echo "==> $*"; }  
-warn(){   echo "!!  $*"; }  
-die(){    echo "ERROR: $*" >&2; exit 1; }  
-need(){   command -v "$1" >/dev/null 2>&1 || die "Missing '$1' (try: sudo apt install $1)"; }  
-  
-banner "${APP_NAME} installer"  
-echo " Repo:      ${REPO} (${BRANCH})"  
-echo " App dir:   ${APP_DIR}"  
-echo " Data dir:  ${DATA_MOUNT}"  
-echo " Service:   ${SERVICE_NAME} (port ${PORT})"  
-  
-# ==================================================================  
-# 1. Preflight  
-# ==================================================================  
-for c in git curl lsblk awk sed findmnt; do need "$c"; done  
-if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then  
-  echo " NOTE: sudo will prompt for your password when needed."  
-fi  
-  
-# ==================================================================  
-# 2. Remove any previous install  
-# ==================================================================  
-ok "Removing any previous install"  
-sudo systemctl stop    "$SERVICE_NAME" 2>/dev/null || true  
-sudo systemctl disable "$SERVICE_NAME" 2>/dev/null || true  
-sudo rm -f "/etc/systemd/system/${SERVICE_NAME}.service"  
-sudo systemctl daemon-reload 2>/dev/null || true  
-sudo rm -rf "$APP_DIR"  
-sudo umount "$DATA_MOUNT" 2>/dev/null || true  
-sudo sed -i "\|${DATA_MOUNT}|d" /etc/fstab || true  
-sudo rm -rf "$DATA_MOUNT"  
-  
-# ==================================================================  
-# 3. Pick a target disk  
-# ==================================================================  
-ok "Boot disk detected: $(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null || echo unknown) (excluded from choices)"  
-  
-mapfile -t DISKS < <(lsblk -dn -o NAME,SIZE,TYPE,TRAN,MODEL 2>/dev/null | awk '$3=="disk" && $1 !~ /^(mmcblk0|loop|ram)/ {model=""; for (i=5; i<=NF; i++) model=(model ? model" " : "") $i; printf "/dev/%s|%s|%s|%s\n", $1, $2, $4, model}')  
-[ "${#DISKS[@]}" -gt 0 ] || die "No candidate disks found. Is the SSD plugged in (USB adapter powered)?"  
-  
-echo ""  
-echo "Available disks:"  
-for i in "${!DISKS[@]}"; do  
-  IFS='|' read -r d sz tr mo <<<"${DISKS[$i]}"  
-  printf "  [%s] %-11s %-7s %s %s\n" "$i" "$d" "$sz" "$tr" "$mo"  
-done  
-echo ""  
-read -r -p "Pick a disk [0-$((${#DISKS[@]}-1))]: " IDX  
-[[ "$IDX" =~ ^[0-9]+$ ]] && [ "$IDX" -lt "${#DISKS[@]}" ] || die "Invalid choice."  
-IFS='|' read -r DISK _ _ _ <<<"${DISKS[$IDX]}"  
-ok "Using ${DISK}"  
-  
-# ==================================================================  
-# 4. UAS quirk hotfix (auto-detect, safe to skip)  
-# ==================================================================  
-ok "Applying UAS quirk check"  
-IDS="$(lsusb | awk '{print $6}')"  
-VIDPID=""  
-for id in $IDS; do  
-  case "$id" in *:*) VIDPID="$id"; break;; esac  
-done  
-if [ -n "$VIDPID" ]; then  
-  echo "options usb-storage quirks=${VIDPID}:u" | sudo tee /etc/modprobe.d/uas-quirk.conf >/dev/null  
-  ok "Wrote /etc/modprobe.d/uas-quirk.conf for ${VIDPID} (takes effect on next reboot)"  
-else  
-  warn "Could not detect USB bridge IDs; skipping UAS quirk."  
-fi  
-  
-# ==================================================================  
-# 5. Partition + format if needed  
-# ==================================================================  
-ok "Partitioning ${DISK} (GPT, single ext4 partition)"  
-sudo parted -s "$DISK" mklabel gpt  
-sudo parted -s "$DISK" mkpart primary ext4 1MiB 100%  
-sudo partprobe "$DISK" || true  
-sleep 1  
-PART="${DISK}1"; [ -b "$PART" ] || PART="${DISK}p1"  
-  
-FSTYPE="$(lsblk -no FSTYPE "$PART" 2>/dev/null || true)"  
-if [ -z "$FSTYPE" ]; then  
-  warn "${PART} has no filesystem."  
-  read -r -p "Type ERASE to format ${PART} as ext4 (destroys all data): " CONFIRM  
-  [ "$CONFIRM" = "ERASE" ] || die "Aborted — disk not formatted."  
-  sudo mkfs.ext4 -F -L dizerdata "$PART"  
-else  
-  ok "Existing filesystem on ${PART}: ${FSTYPE} — keeping data"  
-fi  
-  
-# ==================================================================  
-# 6. Mount by UUID at /mnt/dizerdata  
-# ==================================================================  
-UUID="$(sudo blkid -s UUID -o value "$PART")"  
-[ -n "$UUID" ] || die "Could not read UUID from ${PART}."  
-sudo mkdir -p "$DATA_MOUNT"  
-sudo mount "$PART" "$DATA_MOUNT"  
-grep -q "$UUID" /etc/fstab || echo "UUID=${UUID} ${DATA_MOUNT} ext4 defaults,noatime 0 2" | sudo tee -a /etc/fstab >/dev/null  
-ok "Mounted ${PART} at ${DATA_MOUNT} (UUID ${UUID})"  
-  
-# ==================================================================  
-# 7. Collect API keys + write env file  
-# ==================================================================  
-ok "Collecting API keys"  
-read -r -p "GEMINI_API_KEY: "            GEMINI_API_KEY  
-read -r -p "OPENROUTER_API_KEY_CODER: "  OPENROUTER_API_KEY_CODER  
-read -r -p "GROQ_API_KEY: "              GROQ_API_KEY  
-read -r -p "OPENROUTER_API_KEY_JUDGE (optional, Enter to reuse coder key): " OPENROUTER_API_KEY_JUDGE || true  
-read -r -p "WEBUI_ADMIN_PASSWORD (for /delete-account): " WEBUI_ADMIN_PASSWORD  
-  
+SSD_LABEL="DizerCore"  
+DATA_MOUNT="/mnt/dizerdata"  
 DATA_DIR="${DATA_MOUNT}/dizercore"  
 ENV_FILE="${DATA_DIR}/dizercore.env"  
-sudo mkdir -p "$DATA_DIR"  
-{  
-  echo "DIZER_DATA_DIR=${DATA_DIR}"  
-  echo "GEMINI_API_KEY=${GEMINI_API_KEY}"  
-  echo "OPENROUTER_API_KEY_CODER=${OPENROUTER_API_KEY_CODER}"  
-  echo "GROQ_API_KEY=${GROQ_API_KEY}"  
-  echo "OPENROUTER_API_KEY_JUDGE=${OPENROUTER_API_KEY_JUDGE}"  
-  echo "WEBUI_ADMIN_PASSWORD=${WEBUI_ADMIN_PASSWORD}"  
-} | sudo tee "$ENV_FILE" >/dev/null  
-sudo chmod 600 "$ENV_FILE"  
-ok "Wrote ${ENV_FILE}"  
+  
+APP_DIR="${HOME}/DizerCore-AI"  
+SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"  
+USER_NAME="$(whoami)"  
+  
+QUIRK="usb-storage.quirks=152d:0578:u"  
+CMDLINE="/boot/firmware/cmdline.txt"  
+  
+banner() { echo "============================================================"; echo " $1"; echo "============================================================"; }  
+ok()   { echo "==> $1"; }  
+warn() { echo "!!  $1" >&2; }  
+die()  { echo "XX  $1" >&2; exit 1; }  
+  
+confirm() {  
+  local reply  
+  read -r -p "$1 [y/N] " reply </dev/tty  
+  [[ "$reply" =~ ^[Yy]$ ]]  
+}  
+  
+require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
+  
+# ------------------------------------------------------------------  
+# pick_ssd — scan block devices, exclude the boot disk, let the user  
+# choose. Sets SSD_DEV (a partition) and SSD_DISK (its parent disk).  
+# The picked disk is ALWAYS wiped; nothing is kept.  
+# ------------------------------------------------------------------  
+pick_ssd() {  
+  local root_src root_disk  
+  root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
+  # Root partition's parent disk (mmcblk0 for SD boot, sda for USB boot).  
+  root_disk="$(lsblk -n -o PKNAME "$root_src" 2>/dev/null || true)"  
+  [ -z "$root_disk" ] && root_disk="$(basename "$root_src" | sed 's/p*[0-9]*$//')"  
+  
+  mapfile -t ROWS < <(lsblk -lnpo NAME,TYPE,FSTYPE,SIZE,PKNAME,MOUNTPOINT 2>/dev/null)  
+  
+  CANDS=()  
+  local dev type fstype size pk mnt  
+  while read -r dev type fstype size pk mnt; do  
+    [ "$type" = "part" ] || continue  
+    [ "$pk" = "$root_disk" ] && continue              # skip boot disk  
+    [ "$mnt" = "$DATA_MOUNT" ] && continue            # already our mount  
+    case "$dev" in /dev/mmcblk*|/dev/loop*) continue ;; esac  # skip SD/loops  
+    CANDS+=("$dev|$size|${fstype:-none}|$pk")  
+  done <<<"$(printf '%s\n' "${ROWS[@]}")"  
+  
+  if [ "${#CANDS[@]}" -eq 0 ]; then  
+    die "No usable SSD partition found (boot disk excluded). Plug the SSD in and re-run."  
+  fi  
+  
+  echo ""  
+  echo "Detected candidate SSD partitions:"  
+  local i  
+  for i in "${!CANDS[@]}"; do  
+    IFS='|' read -r cdev csize cfs _cpk <<<"${CANDS[$i]}"  
+    echo "  [$((i + 1))]  ${cdev}  (${csize}, filesystem: ${cfs})"  
+  done  
+  echo ""  
+  
+  local choice  
+  while true; do  
+    read -r -p "Which partition is the DizerCore SSD? [1-${#CANDS[@]}] " choice </dev/tty  
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#CANDS[@]}" ]; then  
+      IFS='|' read -r SSD_DEV _sz _fs SSD_DISK <<<"${CANDS[$((choice - 1))]}"  
+      SSD_DISK="/dev/${SSD_DISK}"  
+      return 0  
+    fi  
+    warn "Enter a number between 1 and ${#CANDS[@]}."  
+  done  
+}  
+  
+# ------------------------------------------------------------------  
+# wipe_ssd — ERASE the whole picked disk: new GPT label, one ext4  
+# partition filling the disk. Requires typing ERASE to proceed.  
+# Sets SSD_PART to the freshly created partition.  
+# ------------------------------------------------------------------  
+wipe_ssd() {  
+  echo ""  
+  warn "INSTALL = FULL WIPE. EVERYTHING on ${SSD_DISK} will be destroyed:"  
+  lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$SSD_DISK" || true  
+  echo ""  
+  local reply  
+  read -r -p "Type ERASE to wipe ${SSD_DISK} clean: " reply </dev/tty  
+  [ "$reply" = "ERASE" ] || { echo "Aborted."; exit 0; }  
+  
+  ok "Unmounting everything on ${SSD_DISK}"  
+  sudo umount "${SSD_DISK}"* 2>/dev/null || true  
+  
+  ok "Wiping ${SSD_DISK} (new GPT label + single ext4 partition)"  
+  sudo wipefs -a "$SSD_DISK"  
+  sudo parted -s "$SSD_DISK" mklabel gpt  
+  sudo parted -s "$SSD_DISK" mkpart primary ext4 0% 100%  
+  sudo partprobe "$SSD_DISK" || true  
+  sleep 2  
+  
+  # New partition node: nvme/mmcblk style disks append pN, others append N.  
+  if [[ "$SSD_DISK" =~ (nvme|mmcblk|loop) ]]; then  
+    SSD_PART="${SSD_DISK}p1"  
+  else  
+    SSD_PART="${SSD_DISK}1"  
+  fi  
+  [ -b "$SSD_PART" ] || die "Expected new partition ${SSD_PART} not found after wipe."  
+  
+  ok "Formatting ${SSD_PART} as ext4 (label ${SSD_LABEL})"  
+  sudo mkfs.ext4 -F -L "$SSD_LABEL" "$SSD_PART"  
+}  
   
 # ==================================================================  
-# 8. Clone repo, venv, deps, stamp VERSION  
+# 0. Detect and remove a previous install  
+# ==================================================================  
+banner "${APP_NAME} installer"  
+require_tty  
+  
+PREV=0  
+systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}.service" && PREV=1  
+[ -d "$APP_DIR" ] && PREV=1  
+[ -f "$ENV_FILE" ] && PREV=1  
+[ -d "$DATA_DIR" ] && PREV=1  
+  
+if [ "$PREV" -eq 1 ]; then  
+  echo ""  
+  warn "A previous ${APP_NAME} install was detected."  
+  echo "This will STOP the service, remove ${APP_DIR}, remove the systemd unit,"  
+  echo "and ERASE all data in ${DATA_DIR} (env file + databases)."  
+  echo "The fstab mount entry for ${DATA_MOUNT} will also be removed and the SSD unmounted."  
+  echo ""  
+  if ! confirm "Remove the previous install AND all its data?"; then  
+    echo "Aborted."  
+    exit 0  
+  fi  
+  ok "Removing previous install"  
+  sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true  
+  sudo systemctl disable "$SERVICE_NAME" 2>/dev/null || true  
+  sudo rm -f "$SERVICE"  
+  sudo systemctl daemon-reload || true  
+  sudo systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true  
+  rm -rf "$APP_DIR"  
+  sudo rm -rf "$DATA_DIR"                          # env file + all DBs (before unmount)  
+  sudo sed -i "\|${DATA_MOUNT}|d" /etc/fstab       # drop the mount entry  
+  sudo umount "$DATA_MOUNT" 2>/dev/null || true  
+  sudo systemctl daemon-reload || true  
+fi  
+if ! confirm "Proceed with a fresh install of ${APP_NAME}?"; then  
+  echo "Aborted."  
+  exit 0  
+fi  
+  
+# ==================================================================  
+# 1. System deps  
+# ==================================================================  
+ok "Installing system dependencies"  
+sudo apt-get update -y  
+sudo apt-get install -y git python3-venv python3-pip util-linux parted  
+  
+# ==================================================================  
+# 2. UAS quirk hotfix — applied AUTOMATICALLY; requires one reboot,  
+#    then re-run this installer.  
+# ==================================================================  
+if ! grep -q "$QUIRK" "$CMDLINE" 2>/dev/null; then  
+  ok "Applying USB UAS quirk hotfix for the SSD bridge (reboot required)"  
+  sudo sed -i "s|\$| ${QUIRK}|" "$CMDLINE"  
+  echo ""  
+  warn "Hotfix applied. REBOOT now, then re-run this installer:"  
+  echo "    sudo reboot"  
+  exit 0  
+fi  
+  
+# ==================================================================  
+# 3. Detect the SSD — then ALWAYS wipe it clean (typed ERASE required)  
+# ==================================================================  
+SSD_DEV=""  
+SSD_DISK=""  
+SSD_PART=""  
+pick_ssd  
+ok "Using ${SSD_DISK} (picked partition ${SSD_DEV}) for DizerCore data"  
+wipe_ssd  
+ok "Wipe complete; using ${SSD_PART}"  
+  
+# ==================================================================  
+# 4. Mount the SSD by UUID  
+# ==================================================================  
+ok "Mounting the SSD"  
+NEW_UUID="$(sudo blkid -s UUID -o value "$SSD_PART")"  
+[ -n "$NEW_UUID" ] || die "Could not read UUID of ${SSD_PART}"  
+  
+sudo mkdir -p "$DATA_MOUNT"  
+sudo sed -i "\|${DATA_MOUNT}|d" /etc/fstab  
+echo "UUID=${NEW_UUID}  ${DATA_MOUNT}  ext4  defaults,nofail,x-systemd.device-timeout=10  0  2" | sudo tee -a /etc/fstab >/dev/null  
+sudo systemctl daemon-reload  
+sudo mount -a  
+findmnt "$DATA_MOUNT" >/dev/null || die "SSD failed to mount at ${DATA_MOUNT}"  
+  
+sudo mkdir -p "$DATA_DIR"  
+sudo chown "$USER_NAME:$USER_NAME" "$DATA_DIR"  
+  
+# ==================================================================  
+# 5. Clone repo + stamp version + freshness check  
 # ==================================================================  
 ok "Cloning ${REPO}"  
 git clone --branch "$BRANCH" "$REPO" "$APP_DIR"  
   
 ok "Stamping version"  
-SHA="$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown )"  
-printf '%s %s %s\n' "$SHA" "$(date -u +%Y-%m-%dT%H:%MZ)" "$REPO" > "$APP_DIR/VERSION"  
+# VERSION = 3 fields: SHA TIMESTAMP REPO  
+printf '%s %s %s\n' \  
+  "$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown" )" \  
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \  
+  "$REPO" > "$APP_DIR/VERSION"  
   
 ok "Checking whether the install is on the latest commit"  
+LOCAL_FULL="$( cd "$APP_DIR" && git rev-parse HEAD 2>/dev/null || echo "" )"  
+LOCAL_SHORT="$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown" )"  
 REMOTE_FULL="$( git ls-remote "$REPO" "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}' )" || true  
+  
 if [ -z "$REMOTE_FULL" ]; then  
   warn "Could not reach GitHub to verify latest commit; skipping freshness check."  
-elif [ "$REMOTE_FULL" = "$( cd "$APP_DIR" && git rev-parse HEAD 2>/dev/null )" ]; then  
-  ok "Installed commit ${SHA} is the latest on ${BRANCH}."  
+elif [ "$REMOTE_FULL" = "$LOCAL_FULL" ]; then  
+  ok "Installed commit ${LOCAL_SHORT} is the latest on ${BRANCH}."  
 else  
-  warn "Installed commit ${SHA} is NOT the latest. Remote ${BRANCH} HEAD is ${REMOTE_FULL:0:7}."  
+  warn "Installed commit ${LOCAL_SHORT} is NOT the latest. Remote ${BRANCH} HEAD is ${REMOTE_FULL:0:7}."  
 fi  
   
 [ -f "$APP_DIR/$ENTRYPOINT" ] || die "Entrypoint ${ENTRYPOINT} not found in repo."  
@@ -168,8 +247,11 @@ if [ ! -f "$APP_DIR/static/dizercore.png" ]; then
   warn "static/dizercore.png not found; dashboard logo and favicon will be blank."  
 fi  
   
-ok "Creating venv + installing dependencies"  
-python3 -m venv "$APP_DIR/venv" || { sudo apt-get update && sudo apt-get install -y python3-venv && python3 -m venv "$APP_DIR/venv"; }  
+# ==================================================================  
+# 6. Python venv + deps  
+# ==================================================================  
+ok "Setting up Python venv"  
+python3 -m venv "$APP_DIR/venv"  
 "$APP_DIR/venv/bin/pip" install --upgrade pip  
 if [ -f "$APP_DIR/requirements.txt" ]; then  
   "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"  
@@ -178,20 +260,43 @@ else
 fi  
   
 # ==================================================================  
-# 9. systemd service  
+# 7. Prompt for API keys (judge key optional — falls back to coder key)  
 # ==================================================================  
-SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"  
-ok "Writing ${SERVICE}"  
+ok "Enter your API keys"  
+read -r -p "1. Google Gemini Studio API key: " GEMINI_API_KEY </dev/tty  
+read -r -p "2. OpenRouter CODER API key (coding agents): " OPENROUTER_API_KEY_CODER </dev/tty  
+read -r -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty  
+read -r -p "4. OpenRouter JUDGE API key (optional, Enter to reuse key 2): " OPENROUTER_API_KEY_JUDGE </dev/tty  
+read -r -p "5. Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty  
+  
+# ==================================================================  
+# 8. Write env file  
+# ==================================================================  
+ok "Writing env file"  
+{  
+  printf 'DIZER_DATA_DIR=%s\n' "$DATA_DIR"  
+  printf 'PORT=%s\n' "$PORT"  
+  printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"  
+  printf 'OPENROUTER_API_KEY_CODER=%s\n' "$OPENROUTER_API_KEY_CODER"  
+  printf 'GROQ_API_KEY=%s\n' "$GROQ_API_KEY"  
+  printf 'OPENROUTER_API_KEY_JUDGE=%s\n' "${OPENROUTER_API_KEY_JUDGE:-$OPENROUTER_API_KEY_CODER}"  
+  printf 'WEBUI_ADMIN_PASSWORD=%s\n' "$WEBUI_ADMIN_PASSWORD"  
+} > "$ENV_FILE"  
+chmod 600 "$ENV_FILE"  
+  
+# ==================================================================  
+# 9. Install systemd service  
+# ==================================================================  
+ok "Installing systemd service"  
 {  
   printf '[Unit]\n'  
-  printf 'Description=DizerCoreAI\n'  
-  printf 'After=network-online.target %s.mount\n' "$(basename "$DATA_MOUNT")"  
+  printf 'Description=%s\n' "$APP_NAME"  
+  printf 'After=network-online.target\n'  
   printf 'Wants=network-online.target\n'  
   printf 'RequiresMountsFor=%s\n' "$DATA_MOUNT"  
   printf '\n'  
   printf '[Service]\n'  
-  printf 'Type=simple\n'  
-  printf 'User=%s\n' "$(whoami)"  
+  printf 'User=%s\n' "$USER_NAME"  
   printf 'WorkingDirectory=%s\n' "$APP_DIR"  
   printf 'EnvironmentFile=%s\n' "$ENV_FILE"  
   printf 'ExecStart=%s/venv/bin/python3 %s/%s\n' "$APP_DIR" "$APP_DIR" "$ENTRYPOINT"  
