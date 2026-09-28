@@ -1,10 +1,11 @@
 # DizerCore-AI  
 # ----------------------------------------------------------------------------  
 # routes.py — FastAPI route handlers.  
-# Auth routes (/login, /register, /logout), app routes (/, /run, /jobs,  
-# DELETE /jobs/{id}, /status, /stop, /version, /favicon.ico).  
+# Auth routes (/login, /register, /logout, /delete-account), app routes  
+# (/, /run, /jobs, DELETE /jobs/{id}, /status, /stop, /version, /favicon.ico).  
 # Shared job/session state lives on runtime.* (populated at startup by lifespan).  
 import asyncio  
+import hmac  
 import secrets  
 import uuid  
   
@@ -18,14 +19,16 @@ from fastapi.responses import (
 import runtime  
 from config import (  
     MAX_PROMPT_CHARS, MAX_FILE_BYTES, MAX_TOTAL_FILE_BYTES, logger,  
+    WEBUI_ADMIN_PASSWORD,  
 )  
 from db import (  
     State, Job,  
     save_job, delete_job_row, save_session, delete_session,  
+    list_users, delete_user, delete_user_sessions, delete_user_jobs,  
 )  
 from auth import (  
     create_user, verify_user, current_user,  
-    LOGIN_HTML, REGISTER_HTML,  
+    LOGIN_HTML, REGISTER_HTML, delete_account_html,  
 )  
 from pipeline import run_pipeline  
 from web import DASHBOARD_HTML  
@@ -62,9 +65,9 @@ async def register_page() -> str:
 @router.post("/register")  
 async def register(username: str = Form(...), password: str = Form(...)):  
     username = username.strip()  
-    if len(username) < 3 or len(password) < 8:  
+    if len(username) < 5 or len(password) < 8:  
         raise HTTPException(status_code=400,  
-                            detail="Username min 3 chars, password min 8 chars.")  
+                            detail="Username min 5 chars, password min 8 chars.")  
     try:  
         create_user(username, password)  
     except ValueError as e:  
@@ -81,6 +84,44 @@ async def logout(request: Request):
     resp = RedirectResponse("/login", status_code=303)  
     resp.delete_cookie("dizer_session")  
     return resp  
+  
+  
+# ---------------------------------------------------------------------------  
+# Routes: account deletion (admin-gated, no login required to reach the page)  
+# ---------------------------------------------------------------------------  
+@router.get("/delete-account", response_class=HTMLResponse)  
+async def delete_account_page() -> str:  
+    return delete_account_html()  
+  
+  
+@router.post("/delete-account")  
+async def delete_account(username: str = Form(...),  
+                         admin_password: str = Form(...)):  
+    # The install-time admin password is the ONLY gate — deleting is  
+    # irreversible, so a wrong/empty password or unset env var refuses outright.  
+    if not WEBUI_ADMIN_PASSWORD or not hmac.compare_digest(  
+            admin_password.encode(), WEBUI_ADMIN_PASSWORD.encode()):  
+        raise HTTPException(status_code=403, detail="Invalid admin password.")  
+    username = username.strip()  
+    if username not in list_users():  
+        raise HTTPException(status_code=404, detail="User not found.")  
+  
+    # Cancel and drop the user's in-memory jobs, then purge all DB rows.  
+    for jid, job in list(runtime.JOBS.items()):  
+        if job.owner == username:  
+            task = runtime.TASKS.get(jid)  
+            if task and not task.done():  
+                task.cancel()  
+            runtime.JOBS.pop(jid, None)  
+            runtime.TASKS.pop(jid, None)  
+    delete_user_jobs(username)  
+    delete_user_sessions(username)  
+    for tok, owner in list(runtime.SESSIONS.items()):  
+        if owner == username:  
+            runtime.SESSIONS.pop(tok, None)  
+    delete_user(username)  
+    logger.info("Admin deleted account: %s", username)  
+    return RedirectResponse("/login", status_code=303)  
   
   
 # ---------------------------------------------------------------------------  
