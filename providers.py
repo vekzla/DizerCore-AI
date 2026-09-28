@@ -182,8 +182,7 @@ def _parse_score(out: str):
     m = _SCORE_RE.search(out or "")  
     if not m:  
         return None  
-    val = int(m.group(1))  
-    return max(0, min(100, val))  
+    return int(m.group(1))  
   
   
 async def _judge_once(model: str, request: str, code: str):  
@@ -223,20 +222,16 @@ async def _judge_once(model: str, request: str, code: str):
   
   
 async def judge_confidence(request: str, code: str) -> str:  
-    """Score ONE candidate. Try each judge slug in order — JUDGE_MODELS first  
-    (ling, then the nemotron judges), then JUDGE_FALLBACK_MODELS — and return  
-    the FIRST usable numeric score as a string. A judge that errors or returns  
-    non-numeric output is dropped and the next slug is tried. Returns '' if no  
-    judge produced a usable integer. Only ONE judge call is made per candidate  
-    in the normal case; extra slugs fire only when a judge returns rubbish."""  
-    for model in list(JUDGE_MODELS) + list(JUDGE_FALLBACK_MODELS):  
-        score = await _judge_once(model, request, code)  
+    """Score ONE candidate 0-100 using the judge pool.  
+    Tries JUDGE_MODELS then JUDGE_FALLBACK_MODELS in order; returns the FIRST  
+    usable score as a string ('' if every judge fails)."""  
+    for slug in JUDGE_MODELS + JUDGE_FALLBACK_MODELS:  
+        score = await _judge_once(slug, request, code)  
         if score is not None:  
-            logger.info("Judge %s scored candidate %s.", model, score)  
             return str(score)  
-        logger.info("Judge %s unusable; rotating to next judge.", model)  
+    logger.info("Judge pool exhausted; no usable score.")  
     return ""  
   
   
-# Deprecated: kept so older callers importing `inkling_confidence` still work.  
+# Deprecated alias — kept so older callers don't break. Use judge_confidence.  
 inkling_confidence = judge_confidence
