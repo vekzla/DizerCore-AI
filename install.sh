@@ -29,6 +29,8 @@ USER_NAME="$(whoami)"
 QUIRK="usb-storage.quirks=152d:0578:u"  
 CMDLINE="/boot/firmware/cmdline.txt"  
   
+MOUNTED=0   # set to 1 once the SSD is mounted — used by the ERR trap  
+  
 banner() { echo "============================================================"; echo " $1"; echo "============================================================"; }  
 ok()   { echo "==> $1"; }  
 warn() { echo "!!  $1" >&2; }  
@@ -41,6 +43,10 @@ confirm() {
 }  
   
 require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
+  
+# Rollback: if the script fails AFTER mounting the SSD, unmount it so a  
+# half-finished install doesn't leave a mount pointing at partial state.  
+trap '[ "$MOUNTED" -eq 1 ] && sudo umount "$DATA_MOUNT" 2>/dev/null; true' ERR  
   
 # ------------------------------------------------------------------  
 # pick_ssd — scan block devices, exclude the boot disk, let the user  
@@ -192,6 +198,7 @@ echo "UUID=${NEW_UUID}  ${DATA_MOUNT}  ext4  defaults,nofail,x-systemd.device-ti
 sudo systemctl daemon-reload  
 sudo mount -a  
 findmnt "$DATA_MOUNT" >/dev/null || die "SSD failed to mount at ${DATA_MOUNT}"  
+MOUNTED=1  
   
 sudo mkdir -p "$DATA_DIR"  
 sudo chown "$USER_NAME:$USER_NAME" "$DATA_DIR"  
@@ -237,13 +244,14 @@ fi
   
 # ==================================================================  
 # 7. Prompt for API keys (judge key optional — falls back to coder key)  
+#    read -s so secrets are not echoed to the terminal.  
 # ==================================================================  
-ok "Enter your API keys"  
-read -r -p "1. Google Gemini Studio API key: " GEMINI_API_KEY </dev/tty  
-read -r -p "2. OpenRouter CODER API key (coding agents): " OPENROUTER_API_KEY_CODER </dev/tty  
-read -r -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty  
-read -r -p "4. OpenRouter JUDGE API key (optional, Enter to reuse key 2): " OPENROUTER_API_KEY_JUDGE </dev/tty  
-read -r -p "5. Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty
+ok "Enter your API keys (input is hidden)"  
+read -r -s -p "1. Google Gemini Studio API key: " GEMINI_API_KEY </dev/tty; echo ""  
+read -r -s -p "2. OpenRouter CODER API key (coding agents): " OPENROUTER_API_KEY_CODER </dev/tty; echo ""  
+read -r -s -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty; echo ""  
+read -r -s -p "4. OpenRouter JUDGE API key (optional, Enter to reuse key 2): " OPENROUTER_API_KEY_JUDGE </dev/tty; echo ""  
+read -r -s -p "5. Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty; echo ""  
   
 # ==================================================================  
 # 8. Write env file  
@@ -257,7 +265,7 @@ ok "Writing env file"
   printf 'GROQ_API_KEY=%s\n' "$GROQ_API_KEY"  
   printf 'OPENROUTER_API_KEY_JUDGE=%s\n' "${OPENROUTER_API_KEY_JUDGE:-$OPENROUTER_API_KEY_CODER}"  
   printf 'WEBUI_ADMIN_PASSWORD=%s\n' "$WEBUI_ADMIN_PASSWORD"  
-} > "$ENV_FILE"
+} > "$ENV_FILE"  
 chmod 600 "$ENV_FILE"  
   
 # ==================================================================  
