@@ -108,7 +108,7 @@ def _tier_map(var: str, light: list, normal: list, heavy: list) -> dict:
 # slug just errors and the safetywall rotates to the next one in the list.  
 # Each tier holds MULTIPLE coding slugs so a failed/junk model rotates to the  
 # next fallback within the same tier. Complexity 1-2 -> light, 3 -> normal,  
-# 4-5 -> heavy.  
+# 4-5 -> heavy. These calls authenticate with OPENROUTER_API_KEY (the CODING key).  
 OPENROUTER_MODELS_BY_TIER = _tier_map(  
     "OPENROUTER_MODEL",  
     light=[  
@@ -131,44 +131,40 @@ OPENROUTER_MODELS_BY_TIER = _tier_map(
         "nvidia/nemotron-3-ultra-550b-a55b:free",  
     ],  
 )  
+  
+# Groq — authenticates with GROQ_API_KEY. compound* sits LAST per tier: 70K TPM  
+# headroom for big payloads but only 250 req/day.  
 GROQ_MODELS_BY_TIER = _tier_map(  
     "GROQ_MODEL",  
-    light=[  
-        "openai/gpt-oss-20b",  
-        "qwen/qwen3.6-27b",  
-        "groq/compound-mini",  
-    ],  
-    normal=[  
-        "openai/gpt-oss-120b",  
-        "qwen/qwen3.8-27b",  
-        "groq/compound",  
-    ],  
-    heavy=[  
-        "openai/gpt-oss-120b",  
-        "qwen/qwen3.8-27b",  
-        "groq/compound",  
-    ],  
+    light=["openai/gpt-oss-20b", "qwen/qwen3.6-27b", "groq/compound-mini"],  
+    normal=["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "groq/compound"],  
+    heavy=["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "groq/compound"],  
 )  
+  
+# Gemini — authenticates with GEMINI_API_KEY. Flash-Lite leads every tier for  
+# headroom (500 req/day); full Flash is heavy-only (20 req/day).  
 GEMINI_MODELS_BY_TIER = _tier_map(  
     "GEMINI_MODEL",  
-    # Flash-Lite = 500 RPD / 15 RPM; full Flash = only 20 RPD / 5 RPM.  
-    # Lead every tier with Flash-Lite for headroom; full Flash is heavy-only,  
-    # and Flash-Lite sits under it as the fallback when the 20/day cap is hit.  
-    light=[  
-        "gemini-3.5-flash-lite",  
-        "gemini-3.1-flash-lite",  
-    ],  
-    normal=[  
-        "gemini-3.5-flash-lite",  
-        "gemini-3.1-flash-lite",  
-    ],  
-    heavy=[  
-        "gemini-3.8-flash",  
-        "gemini-3.6-flash",  
-        "gemini-3.5-flash-lite",  
-        "gemini-3.1-flash-lite",  
-    ],  
+    light=["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],  
+    normal=["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],  
+    heavy=["gemini-3.8-flash", "gemini-3.6-flash",  
+           "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],  
 )  
+  
+# --------------------------------------------------------------------------- #  
+# Reasoning flag — slugs in this set are called with reasoning: {enabled: true}  
+# on OpenRouter. Judges are reasoning models; Groq/Gemini don't use this flag.  
+# --------------------------------------------------------------------------- #  
+REASONING_MODELS = {  
+    # coding slugs  
+    "nvidia/nemotron-3.5-lightning:free",  
+    "nvidia/nemotron-3-super-120b-a12b:free",  
+    "nvidia/nemotron-3-ultra-550b-a55b:free",  
+    # judge slugs  
+    "inclusionai/ling-3.0-flash-vl:free",  
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  
+}  
+  
   
 # --------------------------------------------------------------------------- #  
 # Judge models — score each agent's output 0-100 AFTER all stages run.  
@@ -177,14 +173,14 @@ GEMINI_MODELS_BY_TIER = _tier_map(
 #   is tried, falling through to JUDGE_FALLBACK_MODELS if needed. The FIRST  
 #   usable 0-100 score wins (no averaging), and the agent (OpenRouter / Groq /  
 #   Gemini) with the highest score is reported as best. Only ONE judge call is  
-#   made per candidate in the normal case, keeping free-tier quota use low.  
+#   made per candidate in the normal case.  
 #   Judges authenticate with OPENROUTER_JUDGE_API_KEY — a SEPARATE OpenRouter  
-#   key from the generation key so judge quota never drains the AI key (and  
-#   vice versa). If unset, it falls back to OPENROUTER_API_KEY.  
+#   key so judge quota never drains the generation key (and vice versa); falls  
+#   back to OPENROUTER_API_KEY if unset.  
+#   NOTE: nvidia/nemotron-3.5-content-safety:free was REMOVED — it is a content  
+#   safety classifier that returns labels, not a 0-100 score, so it always  
+#   failed _parse_score and burned a rotation slot.  
 #   Both lists are comma-separated env-overridable.  
-#   NOTE: nvidia/nemotron-3.5-content-safety is a safety classifier and may not  
-#   return a numeric score — the parser discards non-numeric output and rotates  
-#   to the next slug, so a bad slug only costs one wasted call.  
 # --------------------------------------------------------------------------- #  
 def _list_from_env(var: str, default: list) -> list:  
     raw = os.environ.get(var)  
@@ -198,48 +194,19 @@ JUDGE_MODELS = _list_from_env(
     [  
         "inclusionai/ling-3.0-flash-vl:free",  
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  
-        "nvidia/nemotron-3.5-content-safety:free",  
+        "nvidia/nemotron-3-super-120b-a12b:free",  
     ],  
 )  
 JUDGE_FALLBACK_MODELS = _list_from_env("JUDGE_FALLBACK_MODELS", [])  
   
-# --------------------------------------------------------------------------- #  
-# Reasoning flag — EVERY slug used anywhere (generation tiers + judges +  
-# legacy Inkling) is called with "reasoning": {"enabled": True}. Built  
-# programmatically so new slugs above are automatically included.  
-# --------------------------------------------------------------------------- #  
-REASONING_MODELS = set()  
-for _tier_list in OPENROUTER_MODELS_BY_TIER.values():  
-    REASONING_MODELS.update(_tier_list)  
-REASONING_MODELS.update(JUDGE_MODELS)  
-REASONING_MODELS.update(JUDGE_FALLBACK_MODELS)  
-REASONING_MODELS.add(INKLING_MODEL)  
-  
-  
-# --------------------------------------------------------------------------- #  
-# Deflection detection  
-# --------------------------------------------------------------------------- #  
-def _is_unusable(text: str) -> bool:  
-    """True if a stage produced nothing, or deflected instead of doing the work."""  
-    if not text or not text.strip():  
-        return True  
-    low = text.lower()  
-    deflections = (  
-        "paste the code", "please provide", "could you please",  
-        "share the code", "provide the code", "no code provided",  
-        "no code was provided", "i don't see any code", "once i have the",  
-        "as an ai", "i cannot assist", "user safety: safe",  
-    )  
-    return any(d in low for d in deflections)  
-  
   
 # --------------------------------------------------------------------------- #  
 # API keys  
-#   OPENROUTER_API_KEY        -> generation calls (the AI agents)  
-#   OPENROUTER_JUDGE_API_KEY  -> judge pool calls only (separate quota so the  
-#                                judges can't rate-limit generation, and  
-#                                generation can't starve the judges). Optional:  
-#                                falls back to OPENROUTER_API_KEY if unset.  
+#   OPENROUTER_API_KEY        -> coding agent calls (_openrouter_once)  
+#   OPENROUTER_JUDGE_API_KEY  -> judge pool calls only (_judge_once); separate  
+#                                quota so judges can't rate-limit generation  
+#                                and generation can't starve the judges.  
+#                                Falls back to OPENROUTER_API_KEY if unset.  
 # --------------------------------------------------------------------------- #  
 @dataclass  
 class Config:  
@@ -255,8 +222,6 @@ class Config:
         if missing:  
             raise RuntimeError(  
                 f"Missing required environment variables: {', '.join(missing)}")  
-        # Judge key is optional: falls back to the generation key so existing  
-        # installs keep working until a second key is provided.  
         return Config(  
             gemini_key=os.environ["GEMINI_API_KEY"],  
             openrouter_key=os.environ["OPENROUTER_API_KEY"],  
