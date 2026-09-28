@@ -52,8 +52,7 @@ pick_ssd() {
   local root_src root_disk  
   root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
   # Root partition's parent disk (mmcblk0 for SD boot, sda for USB boot).  
-  root_disk="$(lsblk -n -o PKNAME "$root_src" 2>/dev/null || true)"  
-  root_disk="$(basename "$root_disk")"  
+  root_disk="$(basename "$(lsblk -n -o PKNAME "$root_src" 2>/dev/null || true)")"  
   [ -z "$root_disk" ] && root_disk="$(basename "$root_src" | sed 's/p*[0-9]*$//')"  
   
   mapfile -t ROWS < <(lsblk -lnpo NAME,TYPE,FSTYPE,SIZE,PKNAME,MOUNTPOINT 2>/dev/null)  
