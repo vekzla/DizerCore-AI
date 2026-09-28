@@ -1,11 +1,20 @@
+---  
+  
+## `install.sh`  
+  
+```bash  
 #!/usr/bin/env bash  
-# DizerCoreAI one-shot installer for Raspberry Pi 5 (headless).  
-# Run: curl -fsSL https://raw.githubusercontent.com/vekzla/DizerCore-AI/main/install.sh | tr -d '\r' | bash  
+# DizerCore-AI  
+# ==================================================================  
+# install.sh — one-shot installer for Raspberry Pi 5 (headless).  
+# Auto-detects plugged-in SSDs (excludes the SD card / boot disk), lets  
+# the user pick the target, applies the UAS quirk hotfix automatically,  
+# formats ext4 ONLY if needed (with an explicit erase warning), mounts  
+# by UUID at /mnt/dizerdata, writes the env file (incl. optional  
+# dedicated OpenRouter JUDGE key), installs the systemd service.  
+# ==================================================================  
 set -Eeuo pipefail  
   
-# ==================================================================  
-# Config  
-# ==================================================================  
 REPO="https://github.com/vekzla/DizerCore-AI.git"  
 BRANCH="main"  
 APP_NAME="DizerCoreAI"  
@@ -13,7 +22,6 @@ ENTRYPOINT="dizercoreai.py"
 SERVICE_NAME="dizercore"  
 PORT="8000"  
   
-SSD_DEV="/dev/sda1"  
 SSD_LABEL="DizerCore"  
 DATA_MOUNT="/mnt/dizerdata"  
 DATA_DIR="${DATA_MOUNT}/dizercore"  
@@ -26,14 +34,7 @@ USER_NAME="$(whoami)"
 QUIRK="usb-storage.quirks=152d:0578:u"  
 CMDLINE="/boot/firmware/cmdline.txt"  
   
-# ==================================================================  
-# Helpers  
-# ==================================================================  
-banner() {  
-  echo "============================================================"  
-  echo " $1"  
-  echo "============================================================"  
-}  
+banner() { echo "============================================================"; echo " $1"; echo "============================================================"; }  
 ok()   { echo "==> $1"; }  
 warn() { echo "!!  $1" >&2; }  
 die()  { echo "XX  $1" >&2; exit 1; }  
@@ -44,8 +45,54 @@ confirm() {
   [[ "$reply" =~ ^[Yy]$ ]]  
 }  
   
-require_tty() {  
-  [ -e /dev/tty ] || die "No TTY available; run this in an interactive shell."  
+require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
+  
+# ------------------------------------------------------------------  
+# pick_ssd — scan block devices, exclude the boot disk, let the user  
+# choose. Sets SSD_DEV and SSD_FSTYPE.  
+# ------------------------------------------------------------------  
+pick_ssd() {  
+  local root_src root_disk  
+  root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
+  # Root partition's parent disk (mmcblk0 for SD boot, sda for USB boot).  
+  root_disk="$(lsblk -n -o PKNAME "$root_src" 2>/dev/null || true)"  
+  [ -z "$root_disk" ] && root_disk="$(basename "$root_src" | sed 's/p*[0-9]*$//')"  
+  
+  mapfile -t ROWS < <(lsblk -lnpo NAME,TYPE,FSTYPE,SIZE,PKNAME,MOUNTPOINT 2>/dev/null)  
+  
+  CANDS=()  
+  local dev type fstype size pk mnt  
+  while read -r dev type fstype size pk mnt; do  
+    [ "$type" = "part" ] || continue  
+    [ "$pk" = "$root_disk" ] && continue              # skip boot disk  
+    [ "$mnt" = "$DATA_MOUNT" ] && continue            # already our mount  
+    case "$dev" in /dev/mmcblk*|/dev/loop*) continue ;; esac  # skip SD/loops  
+    CANDS+=("$dev|$size|${fstype:-none}")  
+  done <<<"$(printf '%s\n' "${ROWS[@]}")"  
+  
+  if [ "${#CANDS[@]}" -eq 0 ]; then  
+    die "No usable SSD partition found (boot disk excluded). Plug the SSD in and re-run."  
+  fi  
+  
+  echo ""  
+  echo "Detected candidate SSD partitions:"  
+  local i  
+  for i in "${!CANDS[@]}"; do  
+    IFS='|' read -r cdev csize cfs <<<"${CANDS[$i]}"  
+    echo "  [$((i + 1))]  ${cdev}  (${csize}, filesystem: ${cfs})"  
+  done  
+  echo ""  
+  
+  local choice  
+  while true; do  
+    read -r -p "Which partition is the DizerCore SSD? [1-${#CANDS[@]}] " choice </dev/tty  
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#CANDS[@]}" ]; then  
+      IFS='|' read -r SSD_DEV _sz SSD_FSTYPE <<<"${CANDS[$((choice - 1))]}"  
+      [ "$SSD_FSTYPE" = "none" ] && SSD_FSTYPE=""  
+      return 0  
+    fi  
+    warn "Enter a number between 1 and ${#CANDS[@]}."  
+  done  
 }  
   
 # ==================================================================  
@@ -55,33 +102,28 @@ banner "${APP_NAME} installer"
 require_tty  
   
 PREV=0  
-if systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}.service"; then PREV=1; fi  
-if [ -d "$APP_DIR" ]; then PREV=1; fi  
-if [ -f "$ENV_FILE" ]; then PREV=1; fi  
-if [ -d "$DATA_DIR" ]; then PREV=1; fi  
+systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}.service" && PREV=1  
+[ -d "$APP_DIR" ] && PREV=1  
+[ -f "$ENV_FILE" ] && PREV=1  
+[ -d "$DATA_DIR" ] && PREV=1  
   
 if [ "$PREV" -eq 1 ]; then  
   echo ""  
   warn "A previous ${APP_NAME} install was detected."  
-  echo "This will STOP the service, remove ${APP_DIR}, remove the systemd unit,"  
-  echo "and (if you confirm) FORMAT the SSD at ${SSD_DEV}, ERASING all its data."  
+  echo "This will STOP the service, remove ${APP_DIR}, and remove the systemd unit."  
   echo ""  
-  if confirm "Remove the previous install and FORMAT the SSD?"; then  
-    ok "Removing previous install"  
-    sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true  
-    sudo systemctl disable "$SERVICE_NAME" 2>/dev/null || true  
-    sudo rm -f "$SERVICE"  
-    sudo systemctl daemon-reload || true  
-    sudo systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true  
-    rm -rf "$APP_DIR"  
-    sudo umount "$DATA_MOUNT" 2>/dev/null || true  
-    FORMAT_SSD=1  
-  else  
+  if ! confirm "Remove the previous install?"; then  
     echo "Aborted."  
     exit 0  
   fi  
-else  
-  FORMAT_SSD=1  
+  ok "Removing previous install"  
+  sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true  
+  sudo systemctl disable "$SERVICE_NAME" 2>/dev/null || true  
+  sudo rm -f "$SERVICE"  
+  sudo systemctl daemon-reload || true  
+  sudo systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true  
+  rm -rf "$APP_DIR"  
+  sudo umount "$DATA_MOUNT" 2>/dev/null || true  
 fi  
   
 if ! confirm "Proceed with a fresh install of ${APP_NAME}?"; then  
@@ -94,24 +136,45 @@ fi
 # ==================================================================  
 ok "Installing system dependencies"  
 sudo apt-get update -y  
-sudo apt-get install -y git python3-venv python3-pip  
+sudo apt-get install -y git python3-venv python3-pip util-linux  
   
 # ==================================================================  
-# 2. Apply UAS quirk (needs reboot before first format)  
+# 2. UAS quirk hotfix — applied AUTOMATICALLY; requires one reboot,  
+#    then re-run this installer.  
 # ==================================================================  
 if ! grep -q "$QUIRK" "$CMDLINE" 2>/dev/null; then  
-  ok "Applying USB UAS quirk for the SSD bridge (reboot required)"  
+  ok "Applying USB UAS quirk hotfix for the SSD bridge (reboot required)"  
   sudo sed -i "s|\$| ${QUIRK}|" "$CMDLINE"  
   echo ""  
-  warn "Quirk applied. REBOOT now, then re-run this installer:"  
+  warn "Hotfix applied. REBOOT now, then re-run this installer:"  
   echo "    sudo reboot"  
   exit 0  
 fi  
   
 # ==================================================================  
-# 3. Format the SSD to ext4  
+# 3. Detect the SSD and format ONLY if needed  
 # ==================================================================  
-if [ "${FORMAT_SSD:-0}" -eq 1 ]; then  
+SSD_DEV=""  
+SSD_FSTYPE=""  
+pick_ssd  
+ok "Using ${SSD_DEV} for DizerCore data"  
+  
+FORMAT_SSD=0  
+if [ "$SSD_FSTYPE" = "ext4" ]; then  
+  ok "${SSD_DEV} is already ext4; skipping format (existing data kept)"  
+elif [ -n "$SSD_FSTYPE" ]; then  
+  echo ""  
+  warn "${SSD_DEV} is formatted as ${SSD_FSTYPE} and may contain data."  
+  warn "Formatting will ERASE EVERYTHING on ${SSD_DEV}."  
+  confirm "Format ${SSD_DEV} as ext4?" || die "Aborted — ${SSD_DEV} is ${SSD_FSTYPE}."  
+  FORMAT_SSD=1  
+else  
+  warn "${SSD_DEV} has no filesystem. It will be formatted ext4 (label ${SSD_LABEL})."  
+  confirm "Format ${SSD_DEV} as ext4?" || { echo "Aborted."; exit 0; }  
+  FORMAT_SSD=1  
+fi  
+  
+if [ "$FORMAT_SSD" -eq 1 ]; then  
   ok "Formatting ${SSD_DEV} as ext4 (label ${SSD_LABEL})"  
   sudo umount "$SSD_DEV" 2>/dev/null || true  
   sudo mkfs.ext4 -F -L "$SSD_LABEL" "$SSD_DEV"  
@@ -135,25 +198,17 @@ sudo mkdir -p "$DATA_DIR"
 sudo chown "$USER_NAME:$USER_NAME" "$DATA_DIR"  
   
 # ==================================================================  
-# 5.0. Clone the repo  
+# 5. Clone repo + stamp version + freshness check  
 # ==================================================================  
 ok "Cloning ${REPO}"  
 git clone --branch "$BRANCH" "$REPO" "$APP_DIR"  
   
-# ==================================================================  
-# 5.1. Stamp the installed version (short git SHA) for /version  
-# ==================================================================  
 ok "Stamping version"  
 ( cd "$APP_DIR" && git rev-parse --short HEAD > VERSION 2>/dev/null ) || echo "unknown" > "$APP_DIR/VERSION"  
   
-# ==================================================================  
-# 5.2. Confirm the clone is on the latest commit (informational only)  
-# ==================================================================  
 ok "Checking whether the install is on the latest commit"  
-# Full local SHA of what we just cloned, and the short SHA for display.  
 LOCAL_FULL="$( cd "$APP_DIR" && git rev-parse HEAD 2>/dev/null || echo "" )"  
 LOCAL_SHORT="$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown" )"  
-# Full remote SHA of BRANCH HEAD. Guarded so a network error never aborts install.  
 REMOTE_FULL="$( git ls-remote "$REPO" "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}' )" || true  
   
 if [ -z "$REMOTE_FULL" ]; then  
@@ -161,13 +216,12 @@ if [ -z "$REMOTE_FULL" ]; then
 elif [ "$REMOTE_FULL" = "$LOCAL_FULL" ]; then  
   ok "Installed commit ${LOCAL_SHORT} is the latest on ${BRANCH}."  
 else  
-  warn "Installed commit ${LOCAL_SHORT} is NOT the latest. Remote ${BRANCH} HEAD is ${REMOTE_FULL:0:7}. Re-run the installer to update."  
+  warn "Installed commit ${LOCAL_SHORT} is NOT the latest. Remote ${BRANCH} HEAD is ${REMOTE_FULL:0:7}."  
 fi  
   
-# Confirm the entrypoint and logo made it through the clone.  
-[ -f "$APP_DIR/$ENTRYPOINT" ] || die "Entrypoint ${ENTRYPOINT} not found in repo; check the file name/case."  
+[ -f "$APP_DIR/$ENTRYPOINT" ] || die "Entrypoint ${ENTRYPOINT} not found in repo."  
 if [ ! -f "$APP_DIR/static/dizercore.png" ]; then  
-  warn "static/dizercore.png not found; the dashboard/login logo and favicon will be blank."  
+  warn "static/dizercore.png not found; dashboard logo and favicon will be blank."  
 fi  
   
 # ==================================================================  
@@ -183,12 +237,13 @@ else
 fi  
   
 # ==================================================================  
-# 7. Prompt for API keys  
+# 7. Prompt for API keys (judge key optional — falls back to gen key)  
 # ==================================================================  
 ok "Enter your API keys"  
 read -r -p "1. Google Gemini Studio API key: " GEMINI_API_KEY </dev/tty  
-read -r -p "2. OpenRouter API key: " OPENROUTER_API_KEY </dev/tty  
+read -r -p "2. OpenRouter API key (coding agents): " OPENROUTER_API_KEY </dev/tty  
 read -r -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty  
+read -r -p "4. OpenRouter JUDGE API key (optional, Enter to reuse key 2): " OPENROUTER_JUDGE_API_KEY </dev/tty  
   
 # ==================================================================  
 # 8. Write env file  
@@ -200,6 +255,7 @@ ok "Writing env file"
   printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"  
   printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY"  
   printf 'GROQ_API_KEY=%s\n' "$GROQ_API_KEY"  
+  printf 'OPENROUTER_JUDGE_API_KEY=%s\n' "${OPENROUTER_JUDGE_API_KEY:-$OPENROUTER_API_KEY}"  
 } > "$ENV_FILE"  
 chmod 600 "$ENV_FILE"  
   
