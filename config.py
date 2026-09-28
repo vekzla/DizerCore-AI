@@ -213,21 +213,36 @@ REASONING_MODELS.update(JUDGE_FALLBACK_MODELS)
 REASONING_MODELS.add(INKLING_MODEL)    
   
   
-# --------------------------------------------------------------------------- #    
-# Deflection detection    
-# --------------------------------------------------------------------------- #    
-def _is_unusable(text: str) -> bool:    
-    """True if a stage produced nothing, or deflected instead of doing the work."""    
-    if not text or not text.strip():    
-        return True    
-    low = text.lower()    
-    deflections = (    
-        "paste the code", "please provide", "could you please",    
-        "share the code", "provide the code", "no code provided",    
-        "no code was provided", "i don't see any code", "once i have the",    
-        "as an ai", "i cannot assist", "user safety: safe",    
-    )    
+# --------------------------------------------------------------------------- #      
+# Deflection detection      
+# --------------------------------------------------------------------------- #      
+def _is_unusable(text: str) -> bool:      
+    """True if a stage produced nothing, or deflected instead of doing the work."""      
+    if not text or not text.strip():      
+        return True      
+    low = text.lower()      
+    deflections = (      
+        "paste the code", "please provide", "could you please",      
+        "share the code", "provide the code", "no code provided",      
+        "no code was provided", "i don't see any code", "once i have the",      
+        "as an ai", "i cannot assist", "user safety: safe",      
+    )      
     return any(d in low for d in deflections)    
+  
+  
+# --------------------------------------------------------------------------- #    
+# Web UI admin password    
+#   Required by POST /delete-account in routes.py — gates account deletion.    
+#   Set by install.sh (prompt 5) / dizercore.env. If unset, the delete endpoint    
+#   rejects every attempt (403) so a missing env var is never an open door.    
+# --------------------------------------------------------------------------- #    
+WEBUI_ADMIN_PASSWORD = os.environ.get("WEBUI_ADMIN_PASSWORD", "")    
+  
+  
+# --------------------------------------------------------------------------- #      
+# API keys      
+#   OPENROUTER_API_KEY_CODER  -> generation calls (the AI agents)    
+# --------------------------------------------------------------------------- #   
   
   
 # --------------------------------------------------------------------------- #    
