@@ -58,8 +58,7 @@ sudo rm -rf "$DATA_MOUNT"
 # ==================================================================  
 ok "Boot disk detected: $(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null || echo unknown) (excluded from choices)"  
   
-mapfile -t DISKS < <(lsblk -dn -o NAME,SIZE,TYPE,TRAN,MODEL 2>/dev/null \  
-    | awk '$3=="disk" && $1 !~ /^(mmcblk0|loop|ram)/ {printf "/dev/%s|%s|%s|%s\n", $1, $2, $4, substr($0, index($0,$5))}')  
+mapfile -t DISKS < <(lsblk -dn -o NAME,SIZE,TYPE,TRAN,MODEL 2>/dev/null | awk '$3=="disk" && $1 !~ /^(mmcblk0|loop|ram)/ {model=""; for (i=5; i<=NF; i++) model=(model ? model" " : "") $i; printf "/dev/%s|%s|%s|%s\n", $1, $2, $4, model}')  
 [ "${#DISKS[@]}" -gt 0 ] || die "No candidate disks found. Is the SSD plugged in (USB adapter powered)?"  
   
 echo ""  
