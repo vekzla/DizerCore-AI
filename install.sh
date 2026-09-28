@@ -105,9 +105,11 @@ systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}.service" && PR
 if [ "$PREV" -eq 1 ]; then  
   echo ""  
   warn "A previous ${APP_NAME} install was detected."  
-  echo "This will STOP the service, remove ${APP_DIR}, and remove the systemd unit."  
+  echo "This will STOP the service, remove ${APP_DIR}, remove the systemd unit,"  
+  echo "and ERASE all data in ${DATA_DIR} (env file + databases)."  
+  echo "The fstab mount entry for ${DATA_MOUNT} will also be removed and the SSD unmounted."  
   echo ""  
-  if ! confirm "Remove the previous install?"; then  
+  if ! confirm "Remove the previous install AND all its data?"; then  
     echo "Aborted."  
     exit 0  
   fi  
@@ -118,9 +120,11 @@ if [ "$PREV" -eq 1 ]; then
   sudo systemctl daemon-reload || true  
   sudo systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true  
   rm -rf "$APP_DIR"  
+  sudo rm -rf "$DATA_DIR"                          # env file + all DBs (before unmount)  
+  sudo sed -i "\|${DATA_MOUNT}|d" /etc/fstab       # drop the mount entry  
   sudo umount "$DATA_MOUNT" 2>/dev/null || true  
+  sudo systemctl daemon-reload || true  
 fi  
-  
 if ! confirm "Proceed with a fresh install of ${APP_NAME}?"; then  
   echo "Aborted."  
   exit 0  
