@@ -2,10 +2,9 @@
 # ----------------------------------------------------------------------------  
 # auth.py — auth helpers (cookie-session) and auth-page HTML.  
 #  
-# The user + session STORE (SQLite/PBKDF2) lives in db.py. This module used to  
-# carry its own duplicate copies of those functions; that duplication is removed  
-# and they are re-exported from db.py so there is a single source of truth and  
-# the two can never drift out of sync.  
+# The user + session STORE (SQLite/PBKDF2) lives in db.py. This module re-exports  
+# those functions from db.py so there is a single source of truth and the two  
+# can never drift out of sync.  
 from fastapi import HTTPException, Request  
   
 import runtime  
@@ -53,8 +52,8 @@ _STYLE = """
 </style>  
 """  
   
-LOGIN_HTML = f"""<!DOCTYPE html><html><head><title>DizercoreAI Login</title>{_STYLE}</head>  
-<body><div class="center"><h2>DizercoreAI</h2>  
+LOGIN_HTML = f"""<!DOCTYPE html><html><head><title>DizerCore-AI Login</title>{_STYLE}</head>  
+<body><div class="center"><h2>DizerCore-AI</h2>  
 <form method="post" action="/login">  
   <p><input name="username" placeholder="Username" style="width:100%"></p>  
   <p><input name="password" type="password" placeholder="Password" style="width:100%"></p>  
@@ -63,7 +62,7 @@ LOGIN_HTML = f"""<!DOCTYPE html><html><head><title>DizercoreAI Login</title>{_ST
 <p>No account? <a href="/register">Create one</a></p>  
 </div></body></html>"""  
   
-REGISTER_HTML = f"""<!DOCTYPE html><html><head><title>DizercoreAI Register</title>{_STYLE}</head>  
+REGISTER_HTML = f"""<!DOCTYPE html><html><head><title>DizerCore-AI Register</title>{_STYLE}</head>  
 <body><div class="center"><h2>Create account</h2>  
 <form method="post" action="/register">  
   <p><input name="username" placeholder="Username (min 3)" style="width:100%"></p>  
