@@ -223,7 +223,7 @@ git clone --branch "$BRANCH" "$REPO" "$APP_DIR"
   
 ok "Stamping version"  
 # VERSION = 3 fields: SHA TIMESTAMP REPO  
-printf '%s %s %s\n' "$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown" )" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REPO" > "$APP_DIR/VERSION"  
+echo "$(cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown) $(date -u +%Y-%m-%dT%H:%M:%SZ) ${REPO}" > "$APP_DIR/VERSION"  
   
 ok "Checking whether the install is on the latest commit"  
 LOCAL_FULL="$( cd "$APP_DIR" && git rev-parse HEAD 2>/dev/null || echo "" )"  
