@@ -228,8 +228,7 @@ def _is_unusable(text: str) -> bool:
         "as an ai", "i cannot assist", "user safety: safe",      
     )      
     return any(d in low for d in deflections)    
-  
-  
+   
 # --------------------------------------------------------------------------- #    
 # Web UI admin password    
 #   Required by POST /delete-account in routes.py — gates account deletion.    
@@ -237,14 +236,7 @@ def _is_unusable(text: str) -> bool:
 #   rejects every attempt (403) so a missing env var is never an open door.    
 # --------------------------------------------------------------------------- #    
 WEBUI_ADMIN_PASSWORD = os.environ.get("WEBUI_ADMIN_PASSWORD", "")    
-  
-  
-# --------------------------------------------------------------------------- #      
-# API keys      
-#   OPENROUTER_API_KEY_CODER  -> generation calls (the AI agents)    
-# --------------------------------------------------------------------------- #   
-  
-  
+    
 # --------------------------------------------------------------------------- #    
 # API keys    
 #   OPENROUTER_API_KEY_CODER  -> generation calls (the AI agents)    
