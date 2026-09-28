@@ -28,12 +28,20 @@ if not logger.handlers:
     _fh.setFormatter(_fmt)  
     logger.addHandler(_ch); logger.addHandler(_fh)  
   
+  
+def setup_logging() -> logging.Logger:  
+    """Return the configured DizerCore logger (handlers attach on import)."""  
+    return logger  
+  
+  
 VERSION = "1.0.0"  
 SERVICE_NAME = "dizercore"  
   
 # ---------------------------------------------------------------------------  
 # Limits / tuning  
 # ---------------------------------------------------------------------------  
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))  
+  
 MAX_PROMPT_CHARS = int(os.environ.get("MAX_PROMPT_CHARS", "20000"))  
 MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", "2000000"))        # 2 MB/file  
 MAX_TOTAL_FILE_BYTES = int(os.environ.get("MAX_TOTAL_FILE_BYTES", "8000000"))  
@@ -157,7 +165,7 @@ _NON_REASONING = {
 }  
 REASONING_MODELS = (  
     _ALL_OPENROUTER_SLUGS | set(JUDGE_MODELS) | set(JUDGE_FALLBACK_MODELS)  
-) - set(_NON_REASONING)
+) - set(_NON_REASONING)  
   
 # ---------------------------------------------------------------------------  
 # Shared predicates  
