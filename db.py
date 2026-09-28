@@ -93,19 +93,24 @@ class State(str, Enum):
     CANCELLED = "cancelled"  
   
   
-def _default_steps() -> dict:  
-    # Per stage we keep the text output plus which model produced it and a  
-    # 0-100 confidence score (scored by the judge pool, not the stage's own  
-    # model). Blank strings render as empty panels in the UI.  
-    # `*_status` is a live progress flag ("working"/"done"/"") that the  
-    # dashboard animates into a "working…" spinner while the stage runs.  
-    # `summary` / `summary_conf` hold the judge pool's "best is X (NN%)" line.  
-    return {  
-        "generate": "", "generate_model": "", "generate_conf": "", "generate_status": "",  
-        "verify": "",   "verify_model": "",   "verify_conf": "",   "verify_status": "",  
-        "final": "",    "final_model": "",    "final_conf": "",    "final_status": "",  
-        "summary": "",  "summary_conf": "",   "summary_status": "",  
-    }  
+def _default_steps() -> dict:    
+    # Per stage we keep the text output plus which model produced it, a    
+    # 0-100 confidence score (scored by the judge pool, not the stage's own    
+    # model), and the judge's detailed comments explaining that score.    
+    # Blank strings render as empty panels in the UI.    
+    # `*_status` is a live progress flag ("working"/"done"/"") that the    
+    # dashboard animates into a "working…" spinner while the stage runs.    
+    # `summary` / `summary_conf` hold the judge pool's "best is X (NN%)" line    
+    # plus the winning judge's comments.    
+    return {    
+        "generate": "", "generate_model": "", "generate_conf": "",    
+        "generate_status": "", "generate_judge_comments": "",    
+        "verify": "",   "verify_model": "",   "verify_conf": "",    
+        "verify_status": "",   "verify_judge_comments": "",    
+        "final": "",    "final_model": "",    "final_conf": "",    
+        "final_status": "",    "final_judge_comments": "",    
+        "summary": "",  "summary_conf": "",   "summary_status": "",    
+    }
   
   
 def _default_stages() -> dict:  
