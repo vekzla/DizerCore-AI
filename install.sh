@@ -206,29 +206,33 @@ sudo chown "$USER_NAME:$USER_NAME" "$DATA_DIR"
 # ==================================================================  
 # 5. Clone repo + stamp version + freshness check  
 # ==================================================================  
-ok "Cloning ${REPO}"  
-git clone --branch "$BRANCH" "$REPO" "$APP_DIR"  
-  
-ok "Stamping version"  
-( cd "$APP_DIR" && git rev-parse --short HEAD > VERSION 2>/dev/null ) || echo "unknown" > "$APP_DIR/VERSION"  
-  
-ok "Checking whether the install is on the latest commit"  
-LOCAL_FULL="$( cd "$APP_DIR" && git rev-parse HEAD 2>/dev/null || echo "" )"  
-LOCAL_SHORT="$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown" )"  
-REMOTE_FULL="$( git ls-remote "$REPO" "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}' )" || true  
-  
-if [ -z "$REMOTE_FULL" ]; then  
-  warn "Could not reach GitHub to verify latest commit; skipping freshness check."  
-elif [ "$REMOTE_FULL" = "$LOCAL_FULL" ]; then  
-  ok "Installed commit ${LOCAL_SHORT} is the latest on ${BRANCH}."  
-else  
-  warn "Installed commit ${LOCAL_SHORT} is NOT the latest. Remote ${BRANCH} HEAD is ${REMOTE_FULL:0:7}."  
-fi  
-  
-[ -f "$APP_DIR/$ENTRYPOINT" ] || die "Entrypoint ${ENTRYPOINT} not found in repo."  
-if [ ! -f "$APP_DIR/static/dizercore.png" ]; then  
-  warn "static/dizercore.png not found; dashboard logo and favicon will be blank."  
-fi  
+ok "Cloning ${REPO}"    
+git clone --branch "$BRANCH" "$REPO" "$APP_DIR"    
+    
+ok "Stamping version"    
+( cd "$APP_DIR" && \  
+  printf '%s %s %s\n' \  
+    "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \  
+    "$(date -u +%Y-%m-%dT%H:%MZ)" \  
+    "$REPO" > VERSION ) || echo "unknown unknown ${REPO}" > "$APP_DIR/VERSION"    
+    
+ok "Checking whether the install is on the latest commit"    
+LOCAL_FULL="$( cd "$APP_DIR" && git rev-parse HEAD 2>/dev/null || echo "" )"    
+LOCAL_SHORT="$( cd "$APP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown" )"    
+REMOTE_FULL="$( git ls-remote "$REPO" "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}' )" || true    
+    
+if [ -z "$REMOTE_FULL" ]; then    
+  warn "Could not reach GitHub to verify latest commit; skipping freshness check."    
+elif [ "$REMOTE_FULL" = "$LOCAL_FULL" ]; then    
+  ok "Installed commit ${LOCAL_SHORT} is the latest on ${BRANCH}."    
+else    
+  warn "Installed commit ${LOCAL_SHORT} is NOT the latest. Remote ${BRANCH} HEAD is ${REMOTE_FULL:0:7}."    
+fi    
+    
+[ -f "$APP_DIR/$ENTRYPOINT" ] || die "Entrypoint ${ENTRYPOINT} not found in repo."    
+if [ ! -f "$APP_DIR/static/dizercore.png" ]; then    
+  warn "static/dizercore.png not found; dashboard logo and favicon will be blank."    
+fi
   
 # ==================================================================  
 # 6. Python venv + deps  
