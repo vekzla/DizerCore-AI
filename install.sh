@@ -239,6 +239,7 @@ read -r -p "1. Google Gemini Studio API key: " GEMINI_API_KEY </dev/tty
 read -r -p "2. OpenRouter CODER API key (coding agents): " OPENROUTER_API_KEY_CODER </dev/tty  
 read -r -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty  
 read -r -p "4. OpenRouter JUDGE API key (optional, Enter to reuse key 2): " OPENROUTER_API_KEY_JUDGE </dev/tty  
+read -r -p "5. Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty
   
 # ==================================================================  
 # 8. Write env file  
@@ -251,7 +252,8 @@ ok "Writing env file"
   printf 'OPENROUTER_API_KEY_CODER=%s\n' "$OPENROUTER_API_KEY_CODER"  
   printf 'GROQ_API_KEY=%s\n' "$GROQ_API_KEY"  
   printf 'OPENROUTER_API_KEY_JUDGE=%s\n' "${OPENROUTER_API_KEY_JUDGE:-$OPENROUTER_API_KEY_CODER}"  
-} > "$ENV_FILE"  
+  printf 'WEBUI_ADMIN_PASSWORD=%s\n' "$WEBUI_ADMIN_PASSWORD"  
+} > "$ENV_FILE"
 chmod 600 "$ENV_FILE"  
   
 # ==================================================================  
