@@ -1,8 +1,11 @@
-# dizercoreai.py  
-# DizerCore.AI — Pi-hosted multi-agent code pipeline (modular entrypoint).  
-# Pipeline: OpenRouter (generate, tier-rotation) -> Groq (verify) -> Gemini (final cleaned code)  
-# Each stage has a safetywall (rechecks its own output, retries on junk) and a  
-# per-stage confidence score. Complexity (1-5) is user-set and picks each stage's model tier.  
+# DizerCore-AI  
+# ----------------------------------------------------------------------------  
+# dizercoreai.py — entrypoint: builds the FastAPI app, runs lifespan startup  
+# (loads keys, opens DBs, restores jobs/sessions, creates shared clients),  
+# mounts /static, and starts uvicorn.  
+# Pipeline: OpenRouter, Groq, and Gemini each generate code independently and  
+# in parallel; a judge pool then scores every agent's output and picks the best.  
+# Complexity (1-5) is user-set and picks each provider's model tier.  
 import asyncio  
 import logging  
 import os  
