@@ -1,3 +1,4 @@
+# DizerCore-AI — runtime dependencies (see install.sh fallback list)  
 fastapi  
 uvicorn  
 httpx  
