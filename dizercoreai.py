@@ -80,11 +80,4 @@ _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 os.makedirs(_STATIC_DIR, exist_ok=True)  
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")  
   
-# All route handlers live in routes.py (auth, /run, /jobs, /status, /stop, favicon).  
-app.include_router(router)  
-  
-  
-if __name__ == "__main__":  
-    import uvicorn  
-    port = int(os.environ.get("PORT", "8000"))  
-    uvicorn.run(app, host="0.0.0.0", port=port)
+# All route handlers live in routes.py (auth, /run)
