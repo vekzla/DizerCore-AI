@@ -36,8 +36,8 @@ warn() { echo "!!  $1" >&2; }
 die()  { echo "XX  $1" >&2; exit 1; }  
   
 confirm() {  
-  local reply  
-  read -r -p "$1 [y/N] " reply </dev/tty  
+  local reply=""  
+  read -r -p "$1 [y/N] " reply </dev/tty || true  
   [[ "$reply" =~ ^[Yy]$ ]]  
 }  
   
@@ -63,7 +63,7 @@ pick_ssd() {
     [ "$type" = "part" ] || continue  
     [ "$pk" = "$root_disk" ] && continue              # skip boot disk  
     [ "$mnt" = "$DATA_MOUNT" ] && continue            # already our mount  
-    case "$dev" in /dev/mmcblk*|/dev/loop*) continue ;; esac  # skip SD/loops  
+    case "$dev" in /dev/mmcblk*|/dev/loop*|/dev/zram*) continue ;; esac  
     CANDS+=("$dev|$size|${fstype:-none}|$pk")  
   done <<<"$(printf '%s\n' "${ROWS[@]}")"  
   
@@ -80,9 +80,9 @@ pick_ssd() {
   done  
   echo ""  
   
-  local choice  
+  local choice=""  
   while true; do  
-    read -r -p "Which partition is the DizerCore SSD? [1-${#CANDS[@]}] " choice </dev/tty  
+    read -r -p "Which partition is the DizerCore SSD? [1-${#CANDS[@]}] " choice </dev/tty || true  
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#CANDS[@]}" ]; then  
       IFS='|' read -r SSD_DEV _sz _fs SSD_DISK <<<"${CANDS[$((choice - 1))]}"  
       SSD_DISK="/dev/${SSD_DISK}"  
@@ -102,8 +102,8 @@ wipe_ssd() {
   warn "INSTALL = FULL WIPE. EVERYTHING on ${SSD_DISK} will be destroyed:"  
   lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$SSD_DISK" || true  
   echo ""  
-  local reply  
-  read -r -p "Type ERASE to wipe ${SSD_DISK} clean: " reply </dev/tty  
+  local reply=""  
+  read -r -p "Type ERASE to wipe ${SSD_DISK} clean: " reply </dev/tty || true  
   [ "$reply" = "ERASE" ] || { echo "Aborted."; exit 0; }  
   
   ok "Unmounting everything on ${SSD_DISK}"  
