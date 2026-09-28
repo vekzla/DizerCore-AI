@@ -10,7 +10,7 @@ All three agents work **independently and in parallel** — none of them checks 
 builds on another's output. Each is given the same task (your raw instruction plus  
 any attached files) and writes its own complete solution:  
   
-1. **OpenRouter (free)** generates code for your request.  
+1. **OpenRouter (free)** generates code and judges your request.  
 2. **Groq (Cloud)** generates code for your request.  
 3. **Gemini (Google AI Studio)** generates code for your request.  
   
@@ -27,9 +27,9 @@ output is discarded and the next slug is tried, falling through to
 `JUDGE_FALLBACK_MODELS` if needed. The agent with the **highest score** is reported  
 as the best. In the normal case only one judge call is made per candidate.  
   
-The judges authenticate with `OPENROUTER_JUDGE_API_KEY` — a separate OpenRouter  
+The judges authenticate with `OPENROUTER_API_KEY_JUDGE` — a separate OpenRouter  
 key used **only** for scoring, so the judge pool can't rate-limit the generation  
-key (and vice versa). If unset, it falls back to `OPENROUTER_API_KEY`.  
+key (and vice versa). If unset, it falls back to `OPENROUTER_API_KEY_CODER`.
   
 Toggle the pool on/off with the **Judge Pool** checkbox in the dashboard.  
   
@@ -51,7 +51,8 @@ errors, it rotates to the next. Each panel shows **which model was used** and a
   default 6s) to avoid free-tier burst 429s.  
 - **Groq output cap:** `GROQ_MAX_OUTPUT_TOKENS` (default 3000) because gpt-oss/qwen  
   share an 8K tokens/minute budget across prompt + output.  
-- **Separate judge key:** `OPENROUTER_JUDGE_API_KEY` gives scoring its own quota.  
+- **Separate judge key:** `OPENROUTER_API_KEY_JUDGE` gives scoring its own quota.
+- **Separate coder key:** `OPENROUTER_API_KEY_CODER` undertakes the coding process.
 - **Reasoning flag:** every configured slug is called with `reasoning: {enabled: true}`.  
   
 ## Project layout  
@@ -96,7 +97,7 @@ Usage
 Notes / limitations
 
     No HTTPS by default (LAN use). Front with nginx/Caddy for TLS.
-    Without OPENROUTER_JUDGE_API_KEY, judges share the generation key's quota.
+    Without OPENROUTER_API_KEY_JUDGE, judges share the generation key's quota.
     Free-tier caps still apply; wrong/retired slugs are skipped after a wasted call.
     Attached images are noted as placeholders, not analysed as vision input.
 
