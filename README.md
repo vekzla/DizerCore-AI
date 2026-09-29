@@ -130,10 +130,13 @@ Throttles: RATE_LIMIT_DELAY (6s), JUDGE_DELAY (5s).
 ## Usage
 
     Open http://<pi-ip>:8000/, register/log in.
-    Paste your task, attach files (images/PDF route to vision agents), pick
+    Type out your task, attach files (images/PDF route to vision agents), pick
     complexity 1–5, untick agents to skip.
+    Press Run to start the Agents, Stop to Stop the Agents and Clear to wipe the window clean.
+    Job history can be deleted by clicking on 'x'
     Watch each panel stream thinking + code live; judge scores land per agent as
-    it finishes; the summary shows the winner plus a confirmation score.
+    it finishes; the summary shows the winner plus a confirmation score with the jobs history
+    showing "running in orange, done in green and cancelled in grey"
 
 ## Notes / limitations
 
