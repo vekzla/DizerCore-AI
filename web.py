@@ -262,7 +262,7 @@ async function poll(){
   if(!jobId) return;  
   const r=await fetch('/status/'+jobId); if(!r.ok) return;  
   const j=await r.json();  
-  lastUpdated=j.updated||0;  
+  lastUpdated=j.updated_at||0;  
   renderJob(j);  
   if(j.state==='running'||j.state==='pending'){ armPoll(); }  
 }  
@@ -293,7 +293,7 @@ async function loadJobs(){
     row.className='jobrow'+(j.id===jobId?' sel':'');  
     row.dataset.jid=j.id;  
     const label=document.createElement('span'); label.className='joblbl';  
-    label.textContent=(j.prompt||'').slice(0,60);  
+    label.textContent=(j.title||'').slice(0,60);  
     const del=document.createElement('button'); del.className='jobdel'; del.textContent='x';  
     del.onclick=(ev)=>deleteJob(j.id, ev);  
     const b=document.createElement('span'); b.innerHTML=badge(j.state);  
