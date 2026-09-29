@@ -1,7 +1,7 @@
 # DizerCoreAI - AI Architect  
   
 A self-hosted, multi-agent code pipeline that runs headless on a Raspberry Pi 5.  
-You paste a task, pick a complexity (1–5), and three AI agents each write their own  
+You write out a task, pick a complexity (1–5), and three AI agents each write their own  
 solution. A pool of judge models then scores every agent's output and picks the best.  
   
 ## Pipeline  
