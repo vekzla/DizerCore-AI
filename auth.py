@@ -29,11 +29,7 @@ COOKIE_NAME = "dizer_session"
 # --------------------------------------------------------------------------- #  
 def current_user(request: Request) -> str:  
     token = request.cookies.get(COOKIE_NAME)  
-    user = runtime.SESSIONS.get(token or "")  
-    if not user:  
-        raise HTTPException(status_code=401, detail="Not authenticated")  
-    return user  
-  
+    return runtime.SESSIONS.get(token or "", "")  
   
 # --------------------------------------------------------------------------- #  
 # HTML templates for auth pages  
