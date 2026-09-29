@@ -21,91 +21,128 @@ from fastapi.responses import (
 import runtime  
 import version  
 import db  
-from config import (  
-    MAX_PROMPT_CHARS, MAX_FILE_BYTES, MAX_TOTAL_FILE_BYTES,  
-    WEBUI_ADMIN_PASSWORD, classify_upload, logger,  
+from config import ADMIN_PASSWORD, logger  
+from auth import (  
+    LOGIN_HTML, REGISTER_HTML, delete_account_html,  
+    current_user, COOKIE_NAME,  
 )  
-from auth import LOGIN_HTML, REGISTER_HTML  
 from db import Job, State  
 from pipeline import run_pipeline  
 from web import DASHBOARD_HTML  
   
 router = APIRouter()  
   
-_COOKIE = "dizer_session"  
   
-  
-def current_user(request: Request) -> str:  
-    token = request.cookies.get(_COOKIE, "")  
-    return runtime.SESSIONS.get(token, "")  
-  
-  
+# -----------------------------------------------------------------------------  
+# Helpers  
+# -----------------------------------------------------------------------------  
 def _require_user(request: Request) -> str:  
     user = current_user(request)  
     if not user:  
-        raise HTTPException(status_code=401, detail="Not logged in.")  
+        raise HTTPException(status_code=401, detail="Login required.")  
     return user  
   
   
-# ----------------------------------------------------------------------------  
-# Auth  
-# ----------------------------------------------------------------------------  
+# -----------------------------------------------------------------------------  
+# Auth pages  
+# -----------------------------------------------------------------------------  
 @router.get("/login", response_class=HTMLResponse)  
-async def login_page():  
+async def login_page(request: Request):  
+    if current_user(request):  
+        return RedirectResponse("/", status_code=303)  
     return HTMLResponse(LOGIN_HTML)  
   
   
 @router.post("/login")  
 async def login(username: str = Form(""), password: str = Form("")):  
-    if db.verify_user(username, password) or hmac.compare_digest(  
-            password, WEBUI_ADMIN_PASSWORD):  
-        token = secrets.token_hex(16)  
-        runtime.SESSIONS[token] = username or "admin"  
-        resp = RedirectResponse("/", status_code=303)  
-        resp.set_cookie(_COOKIE, token, httponly=True, samesite="lax")  
-        return resp  
-    raise HTTPException(status_code=401, detail="Bad credentials.")  
+    username = username.strip()  
+    if not db.verify_user(username, password):  
+        raise HTTPException(status_code=401, detail="Invalid username or password.")  
+    token = secrets.token_hex(24)  
+    runtime.SESSIONS[token] = username  
+    db.save_session(token, username)  
+    logger.info("User logged in: %s", username)  
+    resp = RedirectResponse("/", status_code=303)  
+    resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax")  
+    return resp  
   
   
 @router.get("/register", response_class=HTMLResponse)  
-async def register_page():  
+async def register_page(request: Request):  
+    if current_user(request):  
+        return RedirectResponse("/", status_code=303)  
     return HTMLResponse(REGISTER_HTML)  
   
   
 @router.post("/register")  
-async def register(username: str = Form(""), password: str = Form("")):  
+async def register(request: Request, username: str = Form(""),  
+                   password: str = Form("")):  
     username = username.strip()  
     if not username or not password:  
-        raise HTTPException(status_code=400, detail="Username taken or invalid.")  
+        raise HTTPException(status_code=400, detail="Username and password required.")  
     try:  
         db.create_user(username, password)  
     except ValueError:  
         raise HTTPException(status_code=400, detail="Username taken or invalid.")  
     logger.info("New user registered: %s", username)  
-    return RedirectResponse("/login", status_code=303)  
+    # Auto-login on success — bounce straight to the dashboard, not the login page.  
+    token = secrets.token_hex(24)  
+    runtime.SESSIONS[token] = username  
+    db.save_session(token, username)  
+    resp = RedirectResponse("/", status_code=303)  
+    resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax")  
+    return resp  
   
   
 @router.get("/logout")  
 async def logout(request: Request):  
-    token = request.cookies.get(_COOKIE, "")  
-    runtime.SESSIONS.pop(token, None)  
+    token = request.cookies.get(COOKIE_NAME, "")  
+    user = runtime.SESSIONS.pop(token, None)  
+    if token:  
+        db.delete_session(token)  
+    if user:  
+        logger.info("User logged out: %s", user)  
     resp = RedirectResponse("/login", status_code=303)  
-    resp.delete_cookie(_COOKIE)  
+    resp.delete_cookie(COOKIE_NAME)  
     return resp  
   
   
+@router.get("/delete-account", response_class=HTMLResponse)  
+async def delete_account_page(request: Request):  
+    _require_user(request)  
+    return HTMLResponse(delete_account_html())  
+  
+  
 @router.post("/delete-account")  
-async def delete_account(request: Request):  
-    user = _require_user(request)  
-    db.delete_user(user)  
-    token = request.cookies.get(_COOKIE, "")  
-    runtime.SESSIONS.pop(token, None)  
-    return RedirectResponse("/login", status_code=303)  
+async def delete_account(request: Request, username: str = Form(""),  
+                         admin_password: str = Form("")):  
+    _require_user(request)  
+    if not hmac.compare_digest(admin_password, ADMIN_PASSWORD or ""):  
+        raise HTTPException(status_code=403, detail="Bad admin password.")  
+    if username not in db.list_users():  
+        raise HTTPException(status_code=404, detail="Unknown user.")  
+    db.delete_user(username)  
+    db.delete_user_sessions(username)  
+    db.delete_user_jobs(username)  
+    for tok, uname in list(runtime.SESSIONS.items()):  
+        if uname == username:  
+            runtime.SESSIONS.pop(tok, None)  
+    for jid, job in list(runtime.JOBS.items()):  
+        if job.owner == username:  
+            runtime.JOBS.pop(jid, None)  
+            runtime.ATTACH.pop(jid, None)  
+            t = runtime.TASKS.pop(jid, None)  
+            if t:  
+                t.cancel()  
+    logger.info("Account deleted: %s", username)  
+    resp = RedirectResponse("/login", status_code=303)  
+    resp.delete_cookie(COOKIE_NAME)  
+    return resp  
   
   
-# ----------------------------------------------------------------------------  
-# App  
-# ----------------------------------------------------------------------------  
+# -----------------------------------------------------------------------------  
+# App routes  
+# -----------------------------------------------------------------------------  
 @router.get("/", response_class=HTMLResponse)  
 async def index(request: Request):  
     if not current_user(request):  
@@ -128,54 +165,41 @@ async def run(
     prompt = prompt.strip()  
     if not prompt:  
         raise HTTPException(status_code=400, detail="Prompt is required.")  
-    if len(prompt) > MAX_PROMPT_CHARS:  
-        raise HTTPException(status_code=400, detail="Prompt too long.")  
-    complexity = max(1, min(5, int(complexity)))  
-  
-    total = 0  
-    job_id = uuid.uuid4().hex[:12]  
-    attach = []  
-    for f in files or []:  
-        data = await f.read()  
-        if not data:  
-            continue  
-        total += len(data)  
-        if len(data) > MAX_FILE_BYTES:  
-            raise HTTPException(status_code=400,  
-                                detail=f"{f.filename} exceeds file size limit.")  
-        if total > MAX_TOTAL_FILE_BYTES:  
-            raise HTTPException(status_code=400,  
-                                detail="Total upload size exceeded.")  
-        kind, text = classify_upload(f.filename or "", data)  
-        if kind == "text":  
-            prompt += f"\n\n--- {f.filename} ---\n{text}"  
-        else:  
-            attach.append({"name": f.filename or "file", "kind": kind,  
-                           "mime": f.content_type or "", "data": data})  
-    runtime.ATTACH[job_id] = attach  
   
     job = Job(  
-        id=job_id,  
-        prompt=prompt,  
-        complexity=complexity,  
+        id=uuid.uuid4().hex[:12],  
         owner=user,  
-        state=State.RUNNING,  
+        prompt=prompt,  
+        complexity=max(1, min(5, complexity)),  
         stages={"openrouter": openrouter == "on",  
                 "groq": groq == "on",  
                 "gemini": gemini == "on",  
                 "inkling": inkling == "on"},  
     )  
+  
+    for f in files or []:  
+        if not f.filename:  
+            continue  
+        data = await f.read()  
+        if not data:  
+            continue  
+        job.attachments.append(f.filename)  
+        runtime.ATTACH.setdefault(job.id, []).append((f.filename, data))  
+  
     runtime.JOBS[job.id] = job  
     db.save_job(job)  
     runtime.TASKS[job.id] = asyncio.create_task(run_pipeline(job))  
+    logger.info("[Job %s] queued by %s", job.id, user)  
     return JSONResponse({"job_id": job.id})  
   
   
 @router.get("/jobs")  
-async def jobs(request: Request):  
+async def list_jobs(request: Request):  
     user = _require_user(request)  
-    mine = [j for j in runtime.JOBS.values() if j.owner == user]  
-    mine.sort(key=lambda j: j.created_at, reverse=True)  
+    mine = sorted(  
+        (j for j in runtime.JOBS.values() if j.owner == user),  
+        key=lambda j: j.created_at, reverse=True,  
+    )  
     return JSONResponse([  
         {"id": j.id, "state": j.state, "created_at": j.created_at,  
          "title": (j.prompt[:60] + ("…" if len(j.prompt) > 60 else ""))}  
@@ -188,10 +212,10 @@ async def delete_job(job_id: str, request: Request):
     user = _require_user(request)  
     job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
-        raise HTTPException(status_code=404, detail="No such job.")  
-    task = runtime.TASKS.get(job_id)  
-    if task and not task.done():  
-        task.cancel()  
+        raise HTTPException(status_code=404, detail="Job not found.")  
+    t = runtime.TASKS.pop(job_id, None)  
+    if t:  
+        t.cancel()  
     runtime.JOBS.pop(job_id, None)  
     runtime.ATTACH.pop(job_id, None)  
     db.delete_job_row(job_id)  
@@ -211,7 +235,7 @@ async def status(job_id: str, request: Request):
     user = _require_user(request)  
     job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
-        raise HTTPException(status_code=404, detail="No such job.")  
+        raise HTTPException(status_code=404, detail="Job not found.")  
     return JSONResponse(_job_payload(job))  
   
   
@@ -220,18 +244,20 @@ async def status_stream(job_id: str, request: Request):
     user = _require_user(request)  
     job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
-        raise HTTPException(status_code=404, detail="No such job.")  
+        raise HTTPException(status_code=404, detail="Job not found.")  
   
     async def gen():  
-        last = None  
+        last = ""  
         while True:  
+            if await request.is_disconnected():  
+                return  
             payload = _job_payload(job)  
             blob = json.dumps(payload, default=str)  
             if blob != last:  
                 last = blob  
                 yield f"data: {blob}\n\n"  
             if job.state in (State.DONE, State.FAILED, State.CANCELLED):  
-                break  
+                return  
             await asyncio.sleep(0.4)  
   
     return StreamingResponse(gen(), media_type="text/event-stream")  
@@ -240,22 +266,23 @@ async def status_stream(job_id: str, request: Request):
 def _cancel_job(job_id: str, user: str):  
     job = runtime.JOBS.get(job_id)  
     if not job or job.owner != user:  
-        raise HTTPException(status_code=404, detail="No such job.")  
-    task = runtime.TASKS.get(job_id)  
-    if task and not task.done():  
-        task.cancel()  
-        logger.info("[Job %s] cancel requested by %s", job_id, user)  
-    elif job.state == State.RUNNING:  
+        raise HTTPException(status_code=404, detail="Job not found.")  
+    if job.state in (State.DONE, State.FAILED, State.CANCELLED):  
+        return JSONResponse({"ok": True, "state": job.state})  
+    t = runtime.TASKS.get(job_id)  
+    if t:  
+        t.cancel()  
+    else:  
         job.state = State.CANCELLED  
-        for k in ("generate", "verify", "final", "summary"):  
-            if job.steps.get(k + "_status") == "working":  
-                job.steps[k + "_status"] = "cancelled"  
+        job.error = "Cancelled by user."  
+        job.touch()  
         db.save_job(job)  
+    logger.info("[Job %s] cancel requested by %s", job_id, user)  
     return JSONResponse({"ok": True})  
   
   
 @router.post("/stop/{job_id}")  
-async def stop(job_id: str, request: Request):  
+async def stop_post(job_id: str, request: Request):  
     return _cancel_job(job_id, _require_user(request))  
   
   
