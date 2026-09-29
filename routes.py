@@ -21,7 +21,7 @@ from fastapi.responses import (
 import runtime  
 import version  
 import db  
-from config import ADMIN_PASSWORD, logger  
+from config import WEBUI_ADMIN_PASSWORD as ADMIN_PASSWORD, logger 
 from auth import (  
     LOGIN_HTML, REGISTER_HTML, delete_account_html,  
     current_user, COOKIE_NAME,  
