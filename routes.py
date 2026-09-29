@@ -74,10 +74,15 @@ async def register_page():
   
 @router.post("/register")  
 async def register(username: str = Form(""), password: str = Form("")):  
-    if db.create_user(username, password):  
-        logger.info("New user registered: %s", username)  
-        return RedirectResponse("/login", status_code=303)  
-    raise HTTPException(status_code=400, detail="Username taken or invalid.")  
+    username = username.strip()  
+    if not username or not password:  
+        raise HTTPException(status_code=400, detail="Username taken or invalid.")  
+    try:  
+        db.create_user(username, password)  
+    except ValueError:  
+        raise HTTPException(status_code=400, detail="Username taken or invalid.")  
+    logger.info("New user registered: %s", username)  
+    return RedirectResponse("/login", status_code=303)  
   
   
 @router.get("/logout")  
@@ -128,7 +133,6 @@ async def run(
     complexity = max(1, min(5, int(complexity)))  
   
     total = 0  
-    runtime.ATTACH  # ensure dict exists  
     job_id = uuid.uuid4().hex[:12]  
     attach = []  
     for f in files or []:  
@@ -190,9 +194,7 @@ async def delete_job(job_id: str, request: Request):
         task.cancel()  
     runtime.JOBS.pop(job_id, None)  
     runtime.ATTACH.pop(job_id, None)  
-    delete = getattr(db, "delete_job", None)  
-    if delete:  
-        delete(job_id)  
+    db.delete_job_row(job_id)  
     return JSONResponse({"ok": True})  
   
   
