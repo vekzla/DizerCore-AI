@@ -275,6 +275,7 @@ fi
 # ==================================================================  
 # 7. API keys — restore from SD backup if the user says yes,  
 #    otherwise prompt and save a fresh backup.  
+#    The WEB UI ADMIN password is ALWAYS asked, even on key restore.  
 # ==================================================================  
 SKIP_KEYS=0  
 if [ -f "$ENV_BAK" ]; then  
@@ -293,11 +294,15 @@ if [ "$SKIP_KEYS" -eq 0 ]; then
   read -r -p "2. OpenRouter CODER API key (coding agents): " OPENROUTER_API_KEY_CODER </dev/tty  
   read -r -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty  
   read -r -p "4. OpenRouter JUDGE API key (optional, Enter to reuse key 2): " OPENROUTER_API_KEY_JUDGE </dev/tty  
-  read -r -p "5. Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty  
+fi  
   
-  # ================================================================  
-  # 8. Write env file  
-  # ================================================================  
+# Admin password is always prompted — even when keys were restored.  
+read -r -p "Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty  
+  
+# ================================================================  
+# 8. Write env file  
+# ================================================================  
+if [ "$SKIP_KEYS" -eq 0 ]; then  
   ok "Writing env file"  
   {  
     printf 'DIZER_DATA_DIR=%s\n' "$DATA_DIR"  
@@ -314,12 +319,21 @@ if [ "$SKIP_KEYS" -eq 0 ]; then
   cp "$ENV_FILE" "$ENV_BAK"  
   chmod 600 "$ENV_BAK"  
   ok "Keys backed up to ${ENV_BAK} (SD card — survives future SSD wipes)"  
+else  
+  # Keys were restored — overwrite just the admin password line.  
+  if grep -q '^WEBUI_ADMIN_PASSWORD=' "$ENV_FILE"; then  
+    sed -i "s|^WEBUI_ADMIN_PASSWORD=.*|WEBUI_ADMIN_PASSWORD=${WEBUI_ADMIN_PASSWORD}|" "$ENV_FILE"  
+  else  
+    printf 'WEBUI_ADMIN_PASSWORD=%s\n' "$WEBUI_ADMIN_PASSWORD" >> "$ENV_FILE"  
+  fi  
+  ok "Admin password updated in ${ENV_FILE}"  
 fi  
   
 # Ensure DIZER_DATA_DIR/PORT are correct even when keys were restored  
 # (the backup may predate a mount-path or port change).  
 grep -q '^DIZER_DATA_DIR=' "$ENV_FILE" || printf 'DIZER_DATA_DIR=%s\n' "$DATA_DIR" >> "$ENV_FILE"  
-grep -q '^PORT=' "$ENV_FILE"          || printf 'PORT=%s\n' "$PORT"            >> "$ENV_FILE"  
+grep -q '^PORT=' "$ENV_FILE"          || printf 'PORT=%s\n' "$PORT"            >> "$ENV_FILE"
+
   
 # ==================================================================  
 # 9. Install systemd service  
