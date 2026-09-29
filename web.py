@@ -14,6 +14,7 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;  
          background:#0f172a; color:#f8fafc; margin:0; display:flex; height:100vh; }  
   #left { width:280px; border-right:1px solid #334155; padding:14px; overflow-y:auto; }  
+  #left img.logo { width:32px; height:32px; border-radius:6px; margin-bottom:10px; }  
   #left h3 { margin:0 0 10px; font-size:14px; color:#94a3b8; text-transform:uppercase;  
              letter-spacing:.5px; }  
   .jobrow { display:flex; align-items:center; gap:6px; padding:4px 6px;  
@@ -34,6 +35,9 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   textarea#prompt { width:100%; height:110px; background:#1e293b; color:#f8fafc;  
                     border:1px solid #334155; border-radius:8px; padding:10px;  
                     font-size:14px; resize:vertical; box-sizing:border-box; }  
+  #dropzone { border:2px dashed #334155; border-radius:8px; padding:10px;  
+              margin-top:8px; font-size:12px; color:#64748b; text-align:center; }  
+  #dropzone.over { border-color:#2563eb; color:#93c5fd; background:#0b1220; }  
   .row { display:flex; gap:10px; margin:10px 0; flex-wrap:wrap; align-items:center; }  
   .row label { font-size:13px; color:#cbd5e1; }  
   select,input[type=number] { background:#1e293b; color:#f8fafc;  
@@ -45,9 +49,11 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   button.stop:hover { background:#991b1b; }  
   button.ghost { background:#334155; }  
   button.ghost:hover { background:#475569; }  
+  button.copy { background:#334155; padding:2px 8px; font-size:11px; float:right; }  
+  button.copy:hover { background:#475569; }  
   .stage { margin-top:16px; border:1px solid #334155; border-radius:10px; padding:12px; }  
   .stage h4 { margin:0 0 8px; font-size:13px; color:#94a3b8; text-transform:uppercase; }  
-  .stage .meta { font-size:12px; color:#64748b; margin-bottom:6px; }  
+  .stage .meta { font-size:12px; color:#64748b; margin-bottom:6px; clear:both; }  
   .stage pre { white-space:pre-wrap; word-wrap:break-word; background:#0b1220;  
                border-radius:6px; padding:10px; font-size:13px; max-height:400px;  
                overflow-y:auto; }  
@@ -62,12 +68,14 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   @keyframes sp { to { transform:rotate(360deg); } }  
 </style></head><body>  
 <div id="left">  
+  <img class="logo" src="/static/dizercore.png" alt="DizerCore">  
   <h3>Jobs</h3>  
   <div id="jobs"></div>  
 </div>  
 <div id="right">  
   <form id="runform" onsubmit="return runJob(event)">  
     <textarea id="prompt" name="prompt" placeholder="Describe what to build..." required></textarea>  
+    <div id="dropzone">Drag &amp; drop files here, or use the picker below</div>  
     <div class="row">  
       <label>Complexity  
         <select name="complexity"><option>1</option><option>2</option>  
@@ -82,19 +90,23 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
       <button type="button" class="stop" onclick="stopJob()">Stop</button>  
     </div>  
   </form>  
-  <div class="stage" id="w-generate"><h4>OpenRouter</h4>  
+  <div class="stage" id="w-generate"><h4>OpenRouter  
+    <button type="button" class="copy" onclick="copyStage('generate',this)">Copy</button></h4>  
     <div class="meta" id="generate_meta"></div>  
     <div class="thinking" id="generate_thinking" style="display:none"></div>  
     <pre id="generate"></pre></div>  
-  <div class="stage" id="w-verify"><h4>Groq</h4>  
+  <div class="stage" id="w-verify"><h4>Groq  
+    <button type="button" class="copy" onclick="copyStage('verify',this)">Copy</button></h4>  
     <div class="meta" id="verify_meta"></div>  
     <div class="thinking" id="verify_thinking" style="display:none"></div>  
     <pre id="verify"></pre></div>  
-  <div class="stage" id="w-final"><h4>Gemini</h4>  
+  <div class="stage" id="w-final"><h4>Gemini  
+    <button type="button" class="copy" onclick="copyStage('final',this)">Copy</button></h4>  
     <div class="meta" id="final_meta"></div>  
     <div class="thinking" id="final_thinking" style="display:none"></div>  
     <pre id="final"></pre></div>  
-  <div class="stage" id="w-summary"><h4>Winner / Summary</h4>  
+  <div class="stage" id="w-summary"><h4>Winner / Summary  
+    <button type="button" class="copy" onclick="copyStage('summary',this)">Copy</button></h4>  
     <div class="meta" id="summary_meta"></div>  
     <pre id="summary"></pre></div>  
   <div id="version"></div>  
@@ -112,6 +124,24 @@ function closeStream(){ if(es){ es.close(); es=null; } }
 function clearSpinners(){  
   for(const k of KEYS){ const el=document.getElementById(k+'_meta'); if(el) el.innerHTML=''; }  
 }  
+function copyStage(key,btn){  
+  const t=document.getElementById(key).textContent;  
+  navigator.clipboard.writeText(t).then(()=>{  
+    btn.textContent='Copied'; setTimeout(()=>{btn.textContent='Copy';},1200);  
+  }).catch(()=>{ btn.textContent='Fail'; setTimeout(()=>{btn.textContent='Copy';},1200); });  
+}  
+// ---- drag and drop: files land in the same input the form submits ----  
+const dz=document.getElementById('dropzone'), fi=document.getElementById('files');  
+dz.addEventListener('dragover',e=>{ e.preventDefault(); dz.classList.add('over'); });  
+dz.addEventListener('dragleave',()=>dz.classList.remove('over'));  
+dz.addEventListener('drop',e=>{  
+  e.preventDefault(); dz.classList.remove('over');  
+  const dt=new DataTransfer();  
+  for(const f of fi.files) dt.items.add(f);  
+  for(const f of e.dataTransfer.files) dt.items.add(f);  
+  fi.files=dt.files;  
+  dz.textContent=fi.files.length+' file(s) attached';  
+});  
 async function runJob(e){  
   e.preventDefault();  
   const fd=new FormData(document.getElementById('runform'));  
