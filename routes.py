@@ -21,7 +21,7 @@ from fastapi.responses import (
 import runtime  
 import version  
 import db  
-from config import WEBUI_ADMIN_PASSWORD as ADMIN_PASSWORD, logger 
+from config import WEBUI_ADMIN_PASSWORD as ADMIN_PASSWORD, logger  
 from auth import (  
     LOGIN_HTML, REGISTER_HTML, delete_account_html,  
     current_user, COOKIE_NAME,  
@@ -109,7 +109,9 @@ async def logout(request: Request):
   
 @router.get("/delete-account", response_class=HTMLResponse)  
 async def delete_account_page(request: Request):  
-    _require_user(request)  
+    # Page route: redirect to /login on no session, not a raw 401.  
+    if not current_user(request):  
+        return RedirectResponse("/login", status_code=303)  
     return HTMLResponse(delete_account_html())  
   
   
