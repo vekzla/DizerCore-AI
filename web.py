@@ -77,9 +77,13 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   <div id="version"></div>  
   <h3>Jobs</h3>  
   <div id="jobs"></div>  
+  <div class="row" style="margin-top:auto">  
+    <button type="button" class="ghost" onclick="location.href='/logout'">Logout</button>  
+    <button type="button" class="stop" onclick="location.href='/delete-account'">Delete account</button>  
+  </div>  
 </div>  
 <div id="right">  
-  <form id="runform" onsubmit="return runJob(event)">  
+  <form id="runform" onsubmit="runJob(event);return false">  
     <textarea id="prompt" name="prompt" placeholder="Describe what to build..." required></textarea>  
     <div id="dropzone">Drag &amp; drop files here, or use the picker below</div>  
     <div class="row">  
@@ -117,10 +121,13 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
     <pre id="summary"></pre></div>  
 </div>  
 <script>  
+// Surface any JS error as an alert — a silent exception is why buttons  
+// "do nothing" with no visible feedback.  
+window.onerror=function(m,s,l,c){ alert('JS error: '+m+' @line '+l); };  
+  
 let jobId=null, lastUpdated=0, es=null, pollTimer=null;  
 const KEYS=['generate','verify','final','summary'];  
 const TERMINAL=['done','failed','cancelled'];  
-// map stage key -> the checkbox that enables it  
 const AGENT_CHECK={'generate':'openrouter','verify':'groq','final':'gemini'};  
   
 function clearStages(){  
@@ -132,7 +139,6 @@ function clearStages(){
   }  
 }  
 function clearAll(){  
-  // wipe inputs AND the agent windows  
   document.getElementById('prompt').value='';  
   const f=document.getElementById('files'); f.value='';  
   document.getElementById('dropzone').textContent='Drag & drop files here, or use the picker below';  
@@ -149,7 +155,7 @@ function copyStage(key,btn){
     btn.textContent='Copied'; setTimeout(()=>{btn.textContent='Copy';},1200);  
   }).catch(()=>{ btn.textContent='Fail'; setTimeout(()=>{btn.textContent='Copy';},1200); });  
 }  
-// ---- drag and drop: files land in the same input the form submits ----  
+// ---- drag and drop ----  
 const dz=document.getElementById('dropzone'), fi=document.getElementById('files');  
 dz.addEventListener('dragover',e=>{ e.preventDefault(); dz.classList.add('over'); });  
 dz.addEventListener('dragleave',()=>dz.classList.remove('over'));  
@@ -161,8 +167,6 @@ dz.addEventListener('drop',e=>{
   fi.files=dt.files;  
   dz.textContent=fi.files.length+' file(s) attached';  
 });  
-// Render one job's steps; when the job is in a terminal state, any step still  
-// marked "working" is shown as its terminal label so spinners never stick.  
 function renderJob(j){  
   const term=TERMINAL.includes((j.state||'').toLowerCase());  
   for(const k of KEYS){  
@@ -181,7 +185,6 @@ function renderJob(j){
   const conf=j.steps['summary_conf'];  
   if(conf) document.getElementById('summary_meta').textContent='score '+conf;  
 }  
-// Show "working" immediately on each enabled agent so Run always gives feedback.  
 function seedWorking(){  
   const form=document.getElementById('runform');  
   for(const k of KEYS){  
@@ -194,21 +197,25 @@ function seedWorking(){
 }  
 async function runJob(e){  
   e.preventDefault();  
-  const fd=new FormData(document.getElementById('runform'));  
-  clearStages();  
-  seedWorking();  
-  const r=await fetch('/run',{method:'POST',body:fd});  
-  if(!r.ok){  
-    let d={}; try{ d=await r.json(); }catch(x){}  
+  try{  
+    const fd=new FormData(document.getElementById('runform'));  
+    if(!(fd.get('prompt')||'').trim()){ alert('Prompt is empty.'); return; }  
     clearStages();  
-    alert('Run failed: HTTP '+r.status+' '+(d.detail||''));  
-    return false;  
+    seedWorking();  
+    const r=await fetch('/run',{method:'POST',body:fd});  
+    if(!r.ok){  
+      let d={}; try{ d=await r.json(); }catch(x){}  
+      clearStages();  
+      alert('Run failed: HTTP '+r.status+' '+(d.detail||''));  
+      return;  
+    }  
+    const d=await r.json();  
+    jobId=d.job_id; lastUpdated=0; closeStream();  
+    prependJobRow(jobId, fd.get('prompt')||'', 'running');  
+    openStream(jobId); poll(); loadJobs();  
+  }catch(err){  
+    alert('Run error: '+err);  
   }  
-  const d=await r.json();  
-  jobId=d.job_id; lastUpdated=0; closeStream();  
-  prependJobRow(jobId, fd.get('prompt')||'', 'running');  
-  openStream(jobId); poll(); loadJobs();  
-  return false;  
 }  
 function prependJobRow(id,prompt,state){  
   const div=document.getElementById('jobs');  
@@ -223,7 +230,6 @@ function prependJobRow(id,prompt,state){
   row.onclick=()=>selectJob(id);  
   div.insertBefore(row, div.firstChild);  
 }  
-// Single click on x: clears the agent panes (if selected) AND removes the row.  
 async function deleteJob(id, ev){  
   if(ev) ev.stopPropagation();  
   if(jobId===id){ jobId=null; closeStream(); clearStages(); }  
