@@ -4,37 +4,39 @@
 # Exposes DASHBOARD_HTML only. Logo is served from /static/dizercore.png  
 # (mount StaticFiles in dizercoreai.py). Login/Register HTML live in auth.py.  
 #  
-# Live updates: /status/stream/{job_id} SSE pushes the full job payload on every  
-# change. poll() remains as the snapshot hydrator and fallback for finished jobs.  
+# Live updates: /status/stream/{job_id} SSE delivers token-smooth deltas for  
+# each step key (generate/verify/final + *_thinking). poll() remains as the  
+# snapshot hydrator and fallback for finished jobs.  
   
 DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>  
 <link rel="icon" href="/static/dizercore.png">  
 <style>  
   body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;  
          background:#0f172a; color:#f8fafc; margin:0; display:flex; height:100vh; }  
-  #left { width:340px; border-right:1px solid #334155; padding:16px; overflow-y:auto;  
+  #left { width:280px; border-right:1px solid #334155; padding:14px; overflow-y:auto;  
           display:flex; flex-direction:column; }  
-  #left img.logo { width:128px; height:128px; border-radius:16px; margin-bottom:8px; }  
-  #version { font-size:22px; color:#475569; margin-bottom:14px; font-weight:600; }  
+  #left img.logo { width:96px; height:96px; border-radius:10px; margin:0 auto 6px;  
+                   display:block; }  
+  #version { font-size:10px; color:#475569; margin-bottom:10px; text-align:center; }  
   #version.ok { color:#4ade80; }  
   #version.update { color:#fbbf24; }  
-  #left h3 { margin:0 0 10px; font-size:16px; color:#94a3b8; text-transform:uppercase;  
+  #left h3 { margin:0 0 10px; font-size:14px; color:#94a3b8; text-transform:uppercase;  
              letter-spacing:.5px; }  
   #jobs { overflow-y:auto; flex:1; }  
-  .jobrow { display:flex; align-items:center; gap:10px; padding:10px 10px;  
-            border-radius:8px; cursor:pointer; }  
+  .jobrow { display:flex; align-items:center; gap:6px; padding:4px 6px;  
+            border-radius:6px; cursor:pointer; }  
   .jobrow:hover { background:#1e293b; }  
   .jobrow.sel { background:#334155; }  
   .joblbl { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;  
-            font-size:17px; }  
+            font-size:13px; }  
   .jobdel { border:none; background:transparent; color:#64748b; cursor:pointer;  
-            font-size:20px; padding:0 4px; }  
+            font-size:14px; padding:0 2px; }  
   .jobdel:hover { color:#ef4444; }  
-  .badge { font-size:14px; padding:2px 10px; border-radius:10px; }  
+  .badge { font-size:10px; padding:1px 6px; border-radius:8px; }  
   .b-running { background:#854d0e; color:#fde047; }  
   .b-done { background:#14532d; color:#86efac; }  
   .b-failed { background:#7f1d1d; color:#fca5a5; }  
-  .b-cancelled { background:#7f1d1d; color:#fca5a5; }  
+  .b-cancelled { background:#334155; color:#cbd5e1; }  
   .b-pending { background:#1e3a8a; color:#93c5fd; }  
   #right { flex:1; padding:18px; overflow-y:auto; display:flex; flex-direction:column; }  
   textarea#prompt { width:100%; height:110px; background:#1e293b; color:#f8fafc;  
@@ -90,7 +92,7 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
       <label><input type="checkbox" name="inkling" checked> Judge</label>  
       <input type="file" id="files" name="files" multiple>  
       <button type="submit">Run</button>  
-      <button type="button" class="ghost" onclick="clearInput()">Clear</button>  
+      <button type="button" class="ghost" onclick="clearAll()">Clear</button>  
       <button type="button" class="stop" onclick="stopJob()">Stop</button>  
     </div>  
   </form>  
@@ -118,17 +120,9 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
 let jobId=null, lastUpdated=0, es=null, pollTimer=null;  
 const KEYS=['generate','verify','final','summary'];  
 const TERMINAL=['done','failed','cancelled'];  
+// map stage key -> the checkbox that enables it  
+const AGENT_CHECK={'generate':'openrouter','verify':'groq','final':'gemini'};  
   
-function clearInput(){  
-  document.getElementById('prompt').value='';  
-  const f=document.getElementById('files'); f.value='';  
-  document.getElementById('dropzone').textContent='Drag & drop files here, or use the picker below';  
-  document.getElementById('prompt').focus();  
-}  
-function closeStream(){ if(es){ es.close(); es=null; } }  
-function clearSpinners(){  
-  for(const k of KEYS){ const el=document.getElementById(k+'_meta'); if(el) el.innerHTML=''; }  
-}  
 function clearStages(){  
   for(const k of KEYS){  
     document.getElementById(k).textContent='';  
@@ -137,12 +131,25 @@ function clearStages(){
     th.textContent=''; th.style.display='none';  
   }  
 }  
+function clearAll(){  
+  // wipe inputs AND the agent windows  
+  document.getElementById('prompt').value='';  
+  const f=document.getElementById('files'); f.value='';  
+  document.getElementById('dropzone').textContent='Drag & drop files here, or use the picker below';  
+  clearStages();  
+  document.getElementById('prompt').focus();  
+}  
+function closeStream(){ if(es){ es.close(); es=null; } }  
+function clearSpinners(){  
+  for(const k of KEYS){ const el=document.getElementById(k+'_meta'); if(el) el.innerHTML=''; }  
+}  
 function copyStage(key,btn){  
   const t=document.getElementById(key).textContent;  
   navigator.clipboard.writeText(t).then(()=>{  
     btn.textContent='Copied'; setTimeout(()=>{btn.textContent='Copy';},1200);  
   }).catch(()=>{ btn.textContent='Fail'; setTimeout(()=>{btn.textContent='Copy';},1200); });  
 }  
+// ---- drag and drop: files land in the same input the form submits ----  
 const dz=document.getElementById('dropzone'), fi=document.getElementById('files');  
 dz.addEventListener('dragover',e=>{ e.preventDefault(); dz.classList.add('over'); });  
 dz.addEventListener('dragleave',()=>dz.classList.remove('over'));  
@@ -174,34 +181,56 @@ function renderJob(j){
   const conf=j.steps['summary_conf'];  
   if(conf) document.getElementById('summary_meta').textContent='score '+conf;  
 }  
+// Show "working" immediately on each enabled agent so Run always gives feedback.  
+function seedWorking(){  
+  const form=document.getElementById('runform');  
+  for(const k of KEYS){  
+    const cb=AGENT_CHECK[k];  
+    const on = cb ? form.elements[cb].checked : form.elements['inkling'].checked;  
+    const metaEl=document.getElementById(k+'_meta');  
+    if(on) metaEl.innerHTML='<span class="spin"></span>working';  
+    else metaEl.textContent='skipped';  
+  }  
+}  
 async function runJob(e){  
   e.preventDefault();  
   const fd=new FormData(document.getElementById('runform'));  
+  clearStages();  
+  seedWorking();  
   const r=await fetch('/run',{method:'POST',body:fd});  
   if(!r.ok){  
     let d={}; try{ d=await r.json(); }catch(x){}  
+    clearStages();  
     alert('Run failed: HTTP '+r.status+' '+(d.detail||''));  
     return false;  
   }  
   const d=await r.json();  
-  jobId=d.job_id; lastUpdated=0; closeStream(); clearStages();  
+  jobId=d.job_id; lastUpdated=0; closeStream();  
   prependJobRow(jobId, fd.get('prompt')||'', 'running');  
   openStream(jobId); poll(); loadJobs();  
   return false;  
 }  
-function prependJobRow(id,title,state){  
+function prependJobRow(id,prompt,state){  
   const div=document.getElementById('jobs');  
   const row=document.createElement('div');  
   row.className='jobrow sel'; row.dataset.jid=id;  
   const b=document.createElement('span'); b.innerHTML=badge(state);  
   const label=document.createElement('span'); label.className='joblbl';  
-  label.textContent=(title||'').slice(0,60)||id;  
+  label.textContent=(prompt||'').slice(0,60)||id;  
   const del=document.createElement('button'); del.className='jobdel'; del.textContent='x';  
-  del.onclick=async (ev)=>{ ev.stopPropagation(); await fetch('/jobs/'+id,{method:'DELETE'});  
-    if(jobId===id){ jobId=null; closeStream(); clearStages(); } loadJobs(); };  
+  del.onclick=(ev)=>deleteJob(id, ev);  
   row.appendChild(b); row.appendChild(label); row.appendChild(del);  
   row.onclick=()=>selectJob(id);  
   div.insertBefore(row, div.firstChild);  
+}  
+// Single click on x: clears the agent panes (if selected) AND removes the row.  
+async function deleteJob(id, ev){  
+  if(ev) ev.stopPropagation();  
+  if(jobId===id){ jobId=null; closeStream(); clearStages(); }  
+  const row=document.querySelector('.jobrow[data-jid="'+id+'"]');  
+  if(row) row.remove();  
+  try{ await fetch('/jobs/'+id,{method:'DELETE'}); }catch(e){}  
+  loadJobs();  
 }  
 async function stopJob(){  
   let target=jobId;  
@@ -262,15 +291,11 @@ async function loadJobs(){
   for(const j of jobs){  
     const row=document.createElement('div');  
     row.className='jobrow'+(j.id===jobId?' sel':'');  
+    row.dataset.jid=j.id;  
     const label=document.createElement('span'); label.className='joblbl';  
-    label.textContent=(j.title||'').slice(0,60);  
+    label.textContent=(j.prompt||'').slice(0,60);  
     const del=document.createElement('button'); del.className='jobdel'; del.textContent='x';  
-    del.onclick=async (ev)=>{  
-      ev.stopPropagation();  
-      await fetch('/jobs/'+j.id,{method:'DELETE'});  
-      if(jobId===j.id){ jobId=null; closeStream(); clearStages(); }  
-      loadJobs();  
-    };  
+    del.onclick=(ev)=>deleteJob(j.id, ev);  
     const b=document.createElement('span'); b.innerHTML=badge(j.state);  
     row.appendChild(b); row.appendChild(label); row.appendChild(del);  
     row.onclick=()=>selectJob(j.id);  
