@@ -7,28 +7,29 @@
 #   curl -fsSL ".../install-executor.sh?nocache=$(date +%s)" | tr -d '\r' | bash  
 #  
 #   1. Asks for the Code-Agent's IP (the pi that will SSH in).  
-#   2. Detects NVMe/SSD (excludes SD card / boot disk), user picks,  
-#      typed ERASE -> GPT + ext4 labelled "DizerCoreBuild".  
-#      Re-run safe: unmounts existing mounts of the disk first.  
+#   2. Lists ALL non-boot disks, user picks by number, typed ERASE ->  
+#      GPT + ext4 labelled "DizerCoreBuild". Re-run safe: unmounts  
+#      existing mounts of the disk first.  
 #   3. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
 #   4. Creates "dizercorebuild" user + ~/.ssh/authorized_keys.  
 #   5. Installs a full build toolchain: C/C++ (gcc/g++, make, cmake,  
 #      ninja, autoconf, pkg-config + common -dev libs), Python 3 + venv  
 #      + pip, Node.js + npm, Go, Rust (cargo), Java (default-jdk) —  
 #      plus sandbox deps (bwrap, prlimit).  
-#   6. Creates /mnt/build/jobs/ + /mnt/build/repo.git, and optionally  
-#      pulls the DizerCore-AI repo into the bare repo (tree mode).  
+#   6. Creates /mnt/build/jobs/ + /mnt/build/repo.git, then ASKS the  
+#      user for a repo URL to clone --bare into it (tree-mode seed);  
+#      blank answer skips the pull entirely.  
 #   7. Prints THIS machine's IP — enter it into install.sh section 9  
 #      on the Code-Agent.  
 #  
 # Command contract (Code-Agent side, pipeline._remote_build):  
 #   rsync -az -e "ssh -i KEY" <pkgdir>/  dizercorebuild@IP:/mnt/build/jobs/<id>/  
-#   ssh  -i KEY dizercorebuild@IP sh -c  
-#        'prlimit --as=<MB>m --cpu=<S>  
-#         bwrap --unshare-all --bind /mnt/build/jobs/<id> /work  
-#         --chdir /work --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"'  
-#   (the ssh args are one command — written wrapped here for docs only;  
-#    pipeline.py passes them as a single argv array, no shell join)  
+#   ssh  -i KEY dizercorebuild@IP  runs:  
+#        prlimit --as=<MB>m --cpu=<S> bwrap --unshare-all  
+#          --bind /mnt/build/jobs/<id> /work --chdir /work  
+#          --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"  
+#   (pipeline.py passes the ssh args as a single argv array — no shell  
+#    join on the edith side; <cmd> runs as a remote shell string)  
 # ==================================================================  
 set -Eeuo pipefail  
   
@@ -36,10 +37,6 @@ BUILD_USER="dizercorebuild"
 BUILD_ROOT="/mnt/build"  
 NVME_LABEL="DizerCoreBuild"  
 USER_HOME="/home/${BUILD_USER}"  
-  
-# Repo pulled into the bare repo for tree-mode builds — override with  
-# REPO_URL env if the app repo moves.  
-REPO_URL="${REPO_URL:-https://github.com/vekzla/DizerCore-AI.git}"  
   
 CODE_IP=""  
 EXEC_IP=""  
@@ -58,7 +55,7 @@ confirm() {
 require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
   
 ask_ip() {  
-  # ask_ip <prompt> -> sets REPLY_IP to a validated IPv4 string  
+  # ask_ip <prompt> [default] -> sets REPLY_IP to a validated IPv4 string  
   local prompt="$1" guess="${2:-}" val=""  
   while true; do  
     if [ -n "$guess" ]; then  
@@ -76,7 +73,7 @@ ask_ip() {
 }  
   
 # ------------------------------------------------------------------  
-# pick_build_disk / wipe_build_disk — build NVMe, always wiped.  
+# pick_build_disk — list every non-boot disk, ALWAYS ask which one.  
 # ------------------------------------------------------------------  
 pick_build_disk() {  
   local root_src root_disk  
@@ -93,20 +90,17 @@ pick_build_disk() {
   done < <(lsblk -b -d -n -o PATH,SIZE 2>/dev/null | while read -r path size; do echo "$path $(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size")"; done)  
   [ "${#disks[@]}" -gt 0 ] || die "No non-boot disk found — is the NVMe/SSD attached?"  
   
-  if [ "${#disks[@]}" -eq 1 ]; then  
-    ok "Detected build disk: ${disks[0]}"  
-    BLK_DISK="${disks[0]%%  *}"  
-  else  
-    echo "Multiple non-boot disks found:"  
-    local i=1  
-    for d in "${disks[@]}"; do echo "  [$i] $d"; i=$((i+1)); done  
-    local n=""  
-    while true; do  
-      read -r -p "Build disk number [1-${#disks[@]}]: " n </dev/tty || true  
-      [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#disks[@]}" ] && break  
-    done  
-    BLK_DISK="${disks[$((n-1))]%%  *}"  
-  fi  
+  echo ""  
+  echo "Available build disks (boot disk excluded):"  
+  local i=1  
+  for d in "${disks[@]}"; do echo "  [$i] $d"; i=$((i+1)); done  
+  local n=""  
+  while true; do  
+    read -r -p "Build disk number [1-${#disks[@]}]: " n </dev/tty || true  
+    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#disks[@]}" ] && break  
+    warn "Enter a number 1-${#disks[@]}"  
+  done  
+  BLK_DISK="${disks[$((n-1))]%%  *}"  
 }  
   
 wipe_build_disk() {  
@@ -116,9 +110,7 @@ wipe_build_disk() {
   read -r -p "Type ERASE to wipe ${BLK_DISK}: " ans </dev/tty || true  
   [ "$ans" = "ERASE" ] || die "Wipe aborted."  
   
-  # Re-run safe: unmount every mount sourced from this disk, then drop  
-  # stale fstab entries for BUILD_ROOT so mount -a can't resurrect the  
-  # old filesystem while we wipe.  
+  # Re-run safe: unmount every mountpoint on this disk first.  
   local mnt=""  
   while read -r mnt; do  
     [ -n "$mnt" ] || continue  
@@ -177,7 +169,7 @@ sudo apt-get install -y libssl-dev libffi-dev zlib1g-dev libbz2-dev libreadline-
 sudo apt-get install -y bubblewrap util-linux parted openssh-server || die "apt failed: sandbox deps"  
   
 # ==================================================================  
-# 2. NVMe — pick, ERASE-wipe, format as DizerCoreBuild  
+# 2. NVMe — pick (always asks), ERASE-wipe, format as DizerCoreBuild  
 # ==================================================================  
 BLK_DISK=""  
 BLK_PART=""  
@@ -228,18 +220,24 @@ sudo chmod 755 "$BUILD_ROOT"
   
 # ==================================================================  
 # 6. Pull a repo into the bare repo (tree-mode seed)  
+#    Asks for the URL — blank skips. Whatever is entered here must be  
+#    listed verbatim in the Code-Agent's ALLOWED_REPOS env list, or  
+#    /run rejects tree-mode builds with HTTP 400.  
 # ==================================================================  
-if confirm "Pull a git repo into ${BUILD_ROOT}/repo.git now?"; then  
-  read -r -p "Repo URL [${REPO_URL}]: " _repo_in </dev/tty || true  
-  SEED_REPO="${_repo_in:-$REPO_URL}"  
+SEED_REPO=""  
+read -r -p "Repo URL to seed into ${BUILD_ROOT}/repo.git (blank = skip): " SEED_REPO </dev/tty || true  
+SEED_REPO="$(echo "$SEED_REPO" | tr -d '[:space:]')"  
+if [ -n "$SEED_REPO" ]; then  
   ok "Cloning ${SEED_REPO} into ${BUILD_ROOT}/repo.git"  
   sudo rm -rf "${BUILD_ROOT}/repo.git"  
-  sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network, or skip and pull later."  
+  sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network, or re-run and leave blank."  
   ok "repo.git seeded at ${BUILD_ROOT}/repo.git"  
+  warn "Add this exact URL to ALLOWED_REPOS in the Code-Agent env file:"  
+  warn "  ${SEED_REPO}"  
 else  
   warn "Skipped — ${BUILD_ROOT}/repo.git stays an empty bare repo."  
   warn "Tree-mode builds will clone the allowlisted URL directly."  
-fi
+fi  
   
 # ==================================================================  
 # 7. Done  
