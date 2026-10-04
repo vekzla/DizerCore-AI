@@ -21,6 +21,7 @@ from fastapi.responses import (
 import runtime  
 import version  
 import db  
+import config  
 from config import WEBUI_ADMIN_PASSWORD as ADMIN_PASSWORD, logger  
 from auth import (  
     LOGIN_HTML, REGISTER_HTML, delete_account_html,  
@@ -41,6 +42,28 @@ def _require_user(request: Request) -> str:
     if not user:  
         raise HTTPException(status_code=401, detail="Login required.")  
     return user  
+  
+  
+def _check_build_repo(repo: str) -> str:  
+    """Validate a tree-mode repo URL against the ALLOWED_REPOS allowlist.  
+  
+    Returns the cleaned URL on success; raises 400 on a URL that isn't  
+    allowlisted. Empty input returns "" (file-build mode).  
+    """  
+    repo = repo.strip()  
+    if not repo:  
+        return ""  
+    allowed = getattr(config, "ALLOWED_REPOS", [])  
+    if not allowed:  
+        raise HTTPException(  
+            status_code=400,  
+            detail="build_repo given but ALLOWED_REPOS is empty — "  
+                   "refusing to fetch arbitrary repos.")  
+    if not any(repo.startswith(prefix) for prefix in allowed):  
+        raise HTTPException(  
+            status_code=400,  
+            detail=f"Repo not in ALLOWED_REPOS allowlist: {repo!r}")  
+    return repo  
   
   
 # -----------------------------------------------------------------------------  
@@ -161,6 +184,9 @@ async def run(
     groq: str = Form("on"),  
     gemini: str = Form("on"),  
     inkling: str = Form("on"),  
+    build: str = Form(""),  
+    build_repo: str = Form(""),  
+    build_cmd: str = Form(""),  
     files: list[UploadFile] = File(default=[]),  
 ):  
     user = _require_user(request)  
@@ -168,15 +194,27 @@ async def run(
     if not prompt:  
         raise HTTPException(status_code=400, detail="Prompt is required.")  
   
+    build_on = build == "on"  
+    repo = _check_build_repo(build_repo) if build_on else ""  
+  
+    stages = {  
+        "openai":  openai == "on",  
+        "groq":    groq == "on",  
+        "gemini":  gemini == "on",  
+        "inkling": inkling == "on",  
+        "build":   build_on,  
+    }  
+    if repo:  
+        stages["build_repo"] = repo          # tree mode (git-worktree profile)  
+    if build_cmd.strip():  
+        stages["build_cmd"] = build_cmd.strip()  # per-job recipe override  
+  
     job = Job(  
         id=uuid.uuid4().hex[:12],  
         owner=user,  
         prompt=prompt,  
         complexity=max(1, min(5, complexity)),  
-        stages={"openai": openai == "on",  
-                "groq": groq == "on",  
-                "gemini": gemini == "on",  
-                "inkling": inkling == "on"},  
+        stages=stages,  
     )  
   
     for f in files or []:  
