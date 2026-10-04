@@ -9,6 +9,7 @@
 #   1. Asks for the Code-Agent's IP (the pi that will SSH in).  
 #   2. Detects NVMe/SSD (excludes SD card / boot disk), user picks,  
 #      typed ERASE -> GPT + ext4 labelled "DizerCoreBuild".  
+#      Re-run safe: unmounts existing mounts of the disk first.  
 #   3. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
 #   4. Creates "dizercorebuild" user + ~/.ssh/authorized_keys.  
 #   5. Installs a full build toolchain: C/C++ (gcc/g++, make, cmake,  
@@ -22,9 +23,9 @@
 #  
 # Command contract (Code-Agent side, pipeline._remote_build):  
 #   rsync -az -e "ssh -i KEY" <pkgdir>/  dizercorebuild@IP:/mnt/build/jobs/<id>/  
-#   ssh  -i KEY dizercorebuild@IP sh -c \  
-#        'prlimit --as=<MB>m --cpu=<S> \  
-#         bwrap --unshare-all --bind /mnt/build/jobs/<id> /work \  
+#   ssh  -i KEY dizercorebuild@IP sh -c  
+#        'prlimit --as=<MB>m --cpu=<S>  
+#         bwrap --unshare-all --bind /mnt/build/jobs/<id> /work  
 #         --chdir /work --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"'  
 #   (the ssh args are one command — written wrapped here for docs only;  
 #    pipeline.py passes them as a single argv array, no shell join)  
@@ -114,6 +115,18 @@ wipe_build_disk() {
   local ans=""  
   read -r -p "Type ERASE to wipe ${BLK_DISK}: " ans </dev/tty || true  
   [ "$ans" = "ERASE" ] || die "Wipe aborted."  
+  
+  # Re-run safe: unmount every mount sourced from this disk, then drop  
+  # stale fstab entries for BUILD_ROOT so mount -a can't resurrect the  
+  # old filesystem while we wipe.  
+  local mnt=""  
+  while read -r mnt; do  
+    [ -n "$mnt" ] || continue  
+    warn "Unmounting ${mnt} (re-install)"  
+    sudo umount "$mnt" || die "Could not unmount ${mnt} — close anything using it and re-run."  
+  done < <(lsblk -n -o MOUNTPOINT "$BLK_DISK" 2>/dev/null | grep -v '^$' || true)  
+  sudo sed -i "\| ${BUILD_ROOT} |d" /etc/fstab  
+  sudo systemctl daemon-reload 2>/dev/null || true  
   
   sudo wipefs -a "$BLK_DISK"  
   sudo parted -s "$BLK_DISK" mklabel gpt  
