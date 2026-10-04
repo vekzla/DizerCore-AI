@@ -52,7 +52,7 @@ GROQ_MAX_OUTPUT_TOKENS = int(os.environ.get("DIZER_GROQ_MAX_OUTPUT_TOKENS", "819
 MAX_SAFETYWALL_TRIES = int(os.environ.get("DIZER_MAX_SAFETYWALL_TRIES", "8"))  
 MAX_CONCURRENT_JOBS = int(os.environ.get("DIZER_MAX_CONCURRENT_JOBS", "2"))  
   
-# Seconds between outbound calls — keeps the free-tier keys under their RPM.  
+# Seconds between outbound calls — keeps free-tier keys under their RPM/RPD.  
 RATE_LIMIT_DELAY = float(os.environ.get("DIZER_RATE_LIMIT_DELAY", "1.0"))  
 JUDGE_DELAY = float(os.environ.get("DIZER_JUDGE_DELAY", "1.0"))  
 RETRY_DELAY = float(os.environ.get("DIZER_RETRY_DELAY", "2.0"))  
@@ -61,73 +61,78 @@ RETRY_DELAY = float(os.environ.get("DIZER_RETRY_DELAY", "2.0"))
 WEBUI_ADMIN_PASSWORD = os.environ.get("WEBUI_ADMIN_PASSWORD", "")  
   
 # ---------------------------------------------------------------------------  
-# Model tiers — comma-separated env overrides, first live slug wins.  
+# Model tiers — comma-separated env overrides, first live slug wins,  
+# rotating through the whole list on 401/402/403/429 or junk output.  
 # ---------------------------------------------------------------------------  
 def _slugs(env_name: str, default: str) -> list[str]:  
     raw = os.environ.get(env_name, default)  
     return [s.strip() for s in raw.split(",") if s.strip()]  
   
   
-OPENROUTER_MODELS_BY_TIER = {  
-    "light":  _slugs("OPENROUTER_MODEL_LIGHT",  
-                     "meta-llama/llama-3.3-70b-instruct:free,qwen/qwen3-32b:free"),  
-    "normal": _slugs("OPENROUTER_MODEL_NORMAL",  
-                     "qwen/qwen3-32b:free,meta-llama/llama-3.3-70b-instruct:free"),  
-    "heavy":  _slugs("OPENROUTER_MODEL_HEAVY",  
-                     "qwen/qwen3-235b-a22b:free,deepseek/deepseek-r1:free"),  
+# ---- ChatGPT (OpenAI) — the coding agent. Slugs from the account's  
+# free-tier catalog; every model is capped at 50 RPD so deep lists are  
+# failover runway, not ceremony. ----  
+OPENAI_MODELS_BY_TIER = {  
+    "light":  _slugs(  
+        "OPENAI_MODEL_LIGHT",  
+        "gpt-5.4-mini,gpt-5.4-nano,gpt-4o-mini,gpt-5-nano,gpt-5-mini"),  
+    "normal": _slugs(  
+        "OPENAI_MODEL_NORMAL",  
+        "gpt-6-luna,gpt-5.6-luna,gpt-5.4,gpt-4.1,gpt-5.2"),  
+    "heavy":  _slugs(  
+        "OPENAI_MODEL_HEAVY",  
+        "gpt-5.5-pro,gpt-5.5,gpt-5.2-pro,gpt-5.3-codex"),  
 }  
   
 GROQ_MODELS_BY_TIER = {  
-    "light":  _slugs("GROQ_MODEL_LIGHT",  "openai/gpt-oss-20b,allam-2-7b"),  
-    "normal": _slugs("GROQ_MODEL_NORMAL", "qwen/qwen3.8-27b,openai/gpt-oss-20b"),  
+    "light":  _slugs("GROQ_MODEL_LIGHT",  
+                     "allam-2-7b,openai/gpt-oss-20b,qwen/qwen3.8-27b"),  
+    "normal": _slugs("GROQ_MODEL_NORMAL",  
+                     "qwen/qwen3.8-27b,openai/gpt-oss-20b,openai/gpt-oss-120b"),  
     "heavy":  _slugs("GROQ_MODEL_HEAVY",  
                      "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b"),  
 }  
   
 GEMINI_MODELS_BY_TIER = {  
-    "light":  _slugs("GEMINI_MODEL_LIGHT",  "gemini-3.5-flash-lite"),  
-    "normal": _slugs("GEMINI_MODEL_NORMAL", "gemini-3.5-flash-lite,gemini-3.8-flash"),  
+    "light":  _slugs("GEMINI_MODEL_LIGHT",  
+                     "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemma-4-26b"),  
+    "normal": _slugs("GEMINI_MODEL_NORMAL",  
+                     "gemini-3.8-flash,gemini-3.6-flash,gemini-3.7-flash,"  
+                     "gemini-3.5-flash,gemini-3.1-flash-lite"),  
     "heavy":  _slugs("GEMINI_MODEL_HEAVY",  
-                     "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.7-flash"),  
+                     "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash,"  
+                     "gemma-4-31b"),  
 }  
   
 # ---------------------------------------------------------------------------  
-# Judge pool — OpenRouter slugs that can reliably emit SCORE:/COMMENTS:.  
+# Judge pool — OpenRouter ONLY. Every slug here accepts  
+# reasoning:{"enabled":true}; providers._judge_once sends it unconditionally.  
 # ---------------------------------------------------------------------------  
 JUDGE_MODELS = _slugs(  
     "JUDGE_MODELS",  
+    "nvidia/nemotron-3-ultra-550b-a55b:free,"  
+    "nvidia/nemotron-3-super-120b-a12b:free,"  
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,"  
-    "inclusionai/ling-3.0-flash-vl:free,"  
-    "qwen/qwen3-32b:free",  
+    "google/gemma-4-31b-it:free,"  
+    "thinkingmachines/inkling:free,"  
+    "qwen/qwen3.8-27b:free",  
 )  
 JUDGE_FALLBACK_MODELS = _slugs(  
     "JUDGE_FALLBACK_MODELS",  
+    "google/gemma-4-26b-a4b-it:free,"  
+    "cohere/north-mini-code:free,"  
+    "nvidia/nemotron-3.5-lightning:free,"  
     "meta-llama/llama-3.3-70b-instruct:free",  
 )  
   
 # ---------------------------------------------------------------------------  
-# Reasoning models — streamed *_thinking deltas shown in the dashboard.  
-# ---------------------------------------------------------------------------  
-_NON_REASONING = { }  # slugs to exclude (historically a dict; set() wraps it)  
-  
-_ALL_OPENROUTER_SLUGS = (  
-    set(OPENROUTER_MODELS_BY_TIER["light"])  
-    | set(OPENROUTER_MODELS_BY_TIER["normal"])  
-    | set(OPENROUTER_MODELS_BY_TIER["heavy"])  
-    | set(JUDGE_MODELS)  
-    | set(JUDGE_FALLBACK_MODELS)  
-)  
-REASONING_MODELS = {  
-    s for s in _ALL_OPENROUTER_SLUGS  
-    if any(k in s for k in ("reasoning", "r1", "thinking", "deepseek"))  
-} - set(_NON_REASONING)  
-  
-# ---------------------------------------------------------------------------  
-# Vision-capable slugs (receive binary attachments inline)  
+# Vision-capable slugs — SUBSTRING markers matched against full slugs.  
+# All gpt-4o/4.1/5.x/6.x chat models take image inputs; gemini/gemma are  
+# natively multimodal. Groq is text-only and gets a note instead.  
 # ---------------------------------------------------------------------------  
 VISION_MODELS = _slugs(  
     "VISION_MODELS",  
-    "gemini,gemma,qwen3-vl,vision,llava",  
+    "gemini,gemma,gpt-4o,gpt-4.1,gpt-5,gpt-6,qwen3-vl,vision,llava",  
 )  
   
   
@@ -148,7 +153,8 @@ def _is_unusable(text: str) -> bool:
 def classify_upload(name: str, mime: str) -> str:  
     """Return 'image', 'pdf', 'docx', or 'text' for an uploaded file."""  
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""  
-    if mime.startswith("image/") or ext in ("png", "jpg", "jpeg", "gif", "webp", "bmp"):  
+    if mime.startswith("image/") or ext in ("png", "jpg", "jpeg", "gif",  
+                                            "webp", "bmp"):  
         return "image"  
     if mime == "application/pdf" or ext == "pdf":  
         return "pdf"  
@@ -172,21 +178,21 @@ def tier_for(complexity: int) -> str:
 @dataclass  
 class Config:  
     gemini_key: str  
-    openrouter_key: str        # generation key (OPENROUTER_API_KEY_CODER)  
+    openai_key: str            # ChatGPT coder key (OPENAI_API_KEY)  
     groq_key: str  
-    judge_key: str             # dedicated key for the judge pool  
+    judge_key: str             # OpenRouter — judge pool ONLY  
   
     @staticmethod  
     def from_env() -> "Config":  
-        missing = [k for k in ("GEMINI_API_KEY", "OPENROUTER_API_KEY_CODER", "GROQ_API_KEY")  
+        missing = [k for k in ("GEMINI_API_KEY", "OPENAI_API_KEY",  
+                               "GROQ_API_KEY", "OPENROUTER_API_KEY_JUDGE")  
                    if not os.environ.get(k)]  
         if missing:  
             raise RuntimeError(  
                 f"Missing required environment variables: {', '.join(missing)}")  
         return Config(  
             gemini_key=os.environ["GEMINI_API_KEY"],  
-            openrouter_key=os.environ["OPENROUTER_API_KEY_CODER"],  
+            openai_key=os.environ["OPENAI_API_KEY"],  
             groq_key=os.environ["GROQ_API_KEY"],  
-            judge_key=os.environ.get("OPENROUTER_API_KEY_JUDGE")  
-                      or os.environ["OPENROUTER_API_KEY_CODER"],  
+            judge_key=os.environ["OPENROUTER_API_KEY_JUDGE"],  
         )
