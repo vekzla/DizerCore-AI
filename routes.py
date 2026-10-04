@@ -53,16 +53,11 @@ def _check_build_repo(repo: str) -> str:
     repo = repo.strip()  
     if not repo:  
         return ""  
-    allowed = getattr(config, "ALLOWED_REPOS", [])  
-    if not allowed:  
+    allowed = getattr(config, "ALLOWED_REPOS", []) or []  
+    if repo not in allowed:  
         raise HTTPException(  
             status_code=400,  
-            detail="build_repo given but ALLOWED_REPOS is empty — "  
-                   "refusing to fetch arbitrary repos.")  
-    if not any(repo.startswith(prefix) for prefix in allowed):  
-        raise HTTPException(  
-            status_code=400,  
-            detail=f"Repo not in ALLOWED_REPOS allowlist: {repo!r}")  
+            detail="Repo URL is not in the ALLOWED_REPOS allowlist.")  
     return repo  
   
   
@@ -194,28 +189,23 @@ async def run(
     if not prompt:  
         raise HTTPException(status_code=400, detail="Prompt is required.")  
   
-    build_on = build == "on"  
-    repo = _check_build_repo(build_repo) if build_on else ""  
-  
-    stages = {  
-        "openai":  openai == "on",  
-        "groq":    groq == "on",  
-        "gemini":  gemini == "on",  
-        "inkling": inkling == "on",  
-        "build":   build_on,  
-    }  
-    if repo:  
-        stages["build_repo"] = repo          # tree mode (git-worktree profile)  
-    if build_cmd.strip():  
-        stages["build_cmd"] = build_cmd.strip()  # per-job recipe override  
+    build_repo = _check_build_repo(build_repo) if build == "on" else ""  
   
     job = Job(  
         id=uuid.uuid4().hex[:12],  
         owner=user,  
         prompt=prompt,  
         complexity=max(1, min(5, complexity)),  
-        stages=stages,  
+        stages={"openai": openai == "on",  
+                "groq": groq == "on",  
+                "gemini": gemini == "on",  
+                "inkling": inkling == "on",  
+                "build": build == "on"},  
     )  
+    if build_repo:  
+        job.stages["build_repo"] = build_repo  
+    if build_cmd.strip():  
+        job.stages["build_cmd"] = build_cmd.strip()  
   
     for f in files or []:  
         if not f.filename:  
@@ -223,8 +213,13 @@ async def run(
         data = await f.read()  
         if not data:  
             continue  
+        # Attachment dict — providers read a["kind"], a["name"], a["data"],  
+        # a["mime"]. Storing tuples here crashes every agent on upload.  
+        kind = config.classify_upload(f.filename, f.content_type or "")  
         job.attachments.append(f.filename)  
-        runtime.ATTACH.setdefault(job.id, []).append((f.filename, data))  
+        runtime.ATTACH.setdefault(job.id, []).append(  
+            {"name": f.filename, "kind": kind,  
+             "mime": f.content_type or "", "data": data})  
   
     runtime.JOBS[job.id] = job  
     db.save_job(job)  
