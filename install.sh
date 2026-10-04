@@ -291,10 +291,11 @@ fi
 if [ "$SKIP_KEYS" -eq 0 ]; then  
   ok "Enter your API keys"  
   read -r -p "1. Google Gemini Studio API key: " GEMINI_API_KEY </dev/tty  
-  read -r -p "2. OpenRouter CODER API key (coding agents): " OPENROUTER_API_KEY_CODER </dev/tty  
+  read -r -p "2. OpenAI API key (ChatGPT coder, starts with sk-): " OPENAI_API_KEY </dev/tty  
   read -r -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty  
-  read -r -p "4. OpenRouter JUDGE API key (optional, Enter to reuse key 2): " OPENROUTER_API_KEY_JUDGE </dev/tty  
-fi  
+  read -r -p "4. OpenRouter JUDGE API key (judging only, required): " OPENROUTER_API_KEY_JUDGE </dev/tty  
+  [ -n "$OPENROUTER_API_KEY_JUDGE" ] || die "OpenRouter JUDGE key is required — the judge pool runs on OpenRouter."  
+fi
   
 # Admin password is always prompted — even when keys were restored.  
 read -r -p "Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty  
@@ -308,9 +309,9 @@ if [ "$SKIP_KEYS" -eq 0 ]; then
     printf 'DIZER_DATA_DIR=%s\n' "$DATA_DIR"  
     printf 'PORT=%s\n' "$PORT"  
     printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"  
-    printf 'OPENROUTER_API_KEY_CODER=%s\n' "$OPENROUTER_API_KEY_CODER"  
+    printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"  
     printf 'GROQ_API_KEY=%s\n' "$GROQ_API_KEY"  
-    printf 'OPENROUTER_API_KEY_JUDGE=%s\n' "${OPENROUTER_API_KEY_JUDGE:-$OPENROUTER_API_KEY_CODER}"  
+    printf 'OPENROUTER_API_KEY_JUDGE=%s\n' "$OPENROUTER_API_KEY_JUDGE"
     printf 'WEBUI_ADMIN_PASSWORD=%s\n' "$WEBUI_ADMIN_PASSWORD"  
   } > "$ENV_FILE"  
   chmod 600 "$ENV_FILE"  
