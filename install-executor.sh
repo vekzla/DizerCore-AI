@@ -173,8 +173,7 @@ fi
 # ==================================================================  
 ok "Installing system dependencies"  
 sudo apt-get update -y  
-sudo apt-get install -y git rsync build-essential cmake python3 \  
-  bubblewrap util-linux parted curl openssh-server  
+sudo apt-get install -y git rsync build-essential cmake python3 bubblewrap util-linux parted curl openssh-server  
   
 if ! command -v ollama >/dev/null 2>&1; then  
   ok "Installing Ollama"  
