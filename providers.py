@@ -1,22 +1,26 @@
 # DizerCore-AI  
 # ----------------------------------------------------------------------------  
-# providers.py — provider integrations (OpenRouter, Groq, Gemini).  
+# providers.py — provider integrations (OpenAI/ChatGPT, Groq, Gemini).  
 # Tier-aware calls rotate model slugs (light/normal/heavy). A safetywall  
 # re-checks each output and retries on junk, rotating to the next slug.  
 # RATE_LIMIT_DELAY is awaited before every outbound GENERATION call; judge  
 # calls use JUDGE_DELAY and run under a caller-supplied asyncio.Lock so the  
 # dedicated judge key never sees parallel requests.  
 #  
-# STREAMING: all three providers stream token deltas (and reasoning deltas for  
-# REASONING_MODELS) straight into job.steps[key] / job.steps[key+"_thinking"]  
-# so the dashboard's SSE endpoint can relay them live. Falls back to a single  
+# OpenRouter serves the JUDGE POOL ONLY (providers._judge_once /  
+# judge_confidence on runtime.cfg.judge_key) — no coding traffic goes there.  
+#  
+# STREAMING: all three providers stream token deltas straight into  
+# job.steps[key] (and *_thinking where the API surfaces it) so the  
+# dashboard's SSE endpoint can relay them live. Falls back to a single  
 # non-streaming call if the stream errors.  
 #  
 # VISION: file uploads classified as image/pdf/docx live in runtime.ATTACH  
-# (job_id -> [{name, kind, mime, data}]). Vision-capable OpenRouter slugs  
-# (config.VISION_MODELS) and all Gemini models receive binaries inline; Groq  
-# is text-only and gets a note naming the binary files.  
+# (job_id -> [{name, kind, mime, data}]). Vision-capable OpenAI slugs  
+# (config.VISION_MODELS substring markers) and all Gemini models receive  
+# binaries inline; Groq is text-only and gets a note naming the files.  
 import asyncio  
+import json  
 import logging  
 import re  
   
@@ -26,28 +30,12 @@ from google.genai import types as gtypes
 import runtime  
 from config import (  
     JUDGE_DELAY, RATE_LIMIT_DELAY, RETRY_DELAY,  
-    OPENROUTER_MODELS_BY_TIER, GROQ_MODELS_BY_TIER, GEMINI_MODELS_BY_TIER,  
+    OPENAI_MODELS_BY_TIER, GROQ_MODELS_BY_TIER, GEMINI_MODELS_BY_TIER,  
     JUDGE_MODELS, JUDGE_FALLBACK_MODELS,  
     VISION_MODELS, classify_upload,  
 )  
   
 logger = logging.getLogger("DizerCore")  
-  
-# Slugs that support reasoning (thinking) output. Kept here rather than  
-# config.py so the gating lives next to the request bodies that use it.  
-# Add a slug to _NON_REASONING if a future model errors on the parameter.  
-_NON_REASONING = set()  
-  
-def _reasoning_slugs():  
-    out = set()  
-    for tier_list in OPENROUTER_MODELS_BY_TIER.values():  
-        out.update(tier_list)  
-    out.update(JUDGE_MODELS)  
-    out.update(JUDGE_FALLBACK_MODELS)  
-    return out - _NON_REASONING  
-  
-REASONING_MODELS = _reasoning_slugs()  
-  
   
 # ---------------------------------------------------------------------------  
 # Safetywall — reject empty/junk output and rotate to the next slug  
@@ -88,11 +76,13 @@ def _job_attachments(job):
   
   
 def _vision_ok(slug: str) -> bool:  
-    return slug in VISION_MODELS  
+    """VISION_MODELS entries are substring markers, not exact slugs."""  
+    return any(m in slug for m in VISION_MODELS)  
   
   
-def _or_content(prompt: str, attachments, slug: str):  
-    """OpenRouter message content: text-only unless slug is vision-capable."""  
+def _vision_content(prompt: str, attachments, slug: str):  
+    """OpenAI-format message content: text-only unless the slug is  
+    vision-capable, in which case binaries go inline as data URIs."""  
     binaries = [a for a in attachments if a["kind"] in ("image", "pdf")]  
     if not binaries:  
         return prompt  
@@ -121,34 +111,25 @@ def _gemini_parts(prompt: str, attachments):
   
   
 # ---------------------------------------------------------------------------  
-# OpenRouter — SSE streaming, tier rotation, optional vision + reasoning  
+# OpenAI (ChatGPT) — OpenAI-compatible SSE streaming + vision  
 # ---------------------------------------------------------------------------  
-async def _openrouter_stream_once(slug: str, prompt: str, attachments,  
-                                  job, key) -> str:  
-    """Single streaming call. Writes content deltas to job.steps[key] and  
-    reasoning deltas to job.steps[key+'_thinking']. Returns full text."""  
+async def _openai_stream_once(slug: str, prompt: str, attachments,  
+                              job, key) -> str:  
     body = {  
         "model": slug,  
         "stream": True,  
         "messages": [{"role": "user",  
-                      "content": _or_content(prompt, attachments, slug)}],  
+                      "content": _vision_content(prompt, attachments, slug)}],  
     }  
-    if slug in REASONING_MODELS:  
-        body["reasoning"] = {"enabled": True}  
-  
-    text, thinking = "", ""  
+    text = ""  
     async with runtime.http_client.stream(  
         "POST",  
-        "https://openrouter.ai/api/v1/chat/completions",  
-        headers={  
-            "Authorization": f"Bearer {runtime.cfg.openrouter_key}",  
-            "HTTP-Referer": "http://192.168.1.6:8000",  
-            "X-Title": "DizerCore.AI",  
-        },  
+        "https://api.openai.com/v1/chat/completions",  
+        headers={"Authorization": f"Bearer {runtime.cfg.openai_key}"},  
         json=body,  
     ) as r:  
-        if r.status_code in (401, 402, 403, 429):  
-            raise RuntimeError(f"OpenRouter {r.status_code}: "  
+        if r.status_code in (401, 402, 403, 404, 429):  
+            raise RuntimeError(f"OpenAI {r.status_code}: "  
                                f"{(await r.aread())[:300]!r}")  
         r.raise_for_status()  
         async for line in r.aiter_lines():  
@@ -158,73 +139,59 @@ async def _openrouter_stream_once(slug: str, prompt: str, attachments,
             if payload == "[DONE]":  
                 break  
             try:  
-                delta = __import__("json").loads(  
-                    payload)["choices"][0].get("delta") or {}  
+                delta = json.loads(payload)["choices"][0].get("delta") or {}  
             except Exception:  
                 continue  
-            if delta.get("reasoning"):  
-                thinking += delta["reasoning"]  
             if delta.get("content"):  
                 text += delta["content"]  
-            if job is not None and key:  
-                job.steps[key] = text  
-                job.steps[key + "_thinking"] = thinking  
+                if job is not None and key:  
+                    job.steps[key] = text  
     return text  
   
   
-async def openrouter_generate(prompt: str, tier: str, job=None,  
-                              key: str = "") -> tuple[str, str]:  
+async def openai_generate(prompt: str, tier: str, job=None,  
+                          key: str = "") -> tuple[str, str]:  
     """Rotate through the tier's slugs; safetywall retries on junk."""  
     attachments = _job_attachments(job)  
-    slugs = list(OPENROUTER_MODELS_BY_TIER.get(tier, []))  
+    slugs = list(OPENAI_MODELS_BY_TIER.get(tier, []))  
     has_binary = any(a["kind"] in ("image", "pdf") for a in attachments)  
     if has_binary:  
-        # Binary attached: vision-capable slugs first so the file is read,  
-        # text-only slugs stay as last resort (they get a note instead).  
+        # Binary attached: vision-capable slugs first so the file is read.  
         slugs.sort(key=lambda s: 0 if _vision_ok(s) else 1)  
   
     last_err = None  
-    for i, slug in enumerate(slugs[:_MAX_ATTEMPTS] or [None]):  
-        if slug is None:  
-            break  
+    for slug in slugs[:_MAX_ATTEMPTS]:  
         try:  
             await asyncio.sleep(RATE_LIMIT_DELAY)  
             try:  
-                out = await _openrouter_stream_once(  
+                out = await _openai_stream_once(  
                     slug, prompt, attachments, job, key)  
             except Exception:  
-                # Streaming failed — fall back to a plain non-streaming call.  
-                out = await _openrouter_once(slug, prompt, attachments)  
+                out = await _openai_once(slug, prompt, attachments)  
             if _is_unusable(out):  
-                logger.warning("OpenRouter %s: junk output, rotating.", slug)  
+                logger.warning("OpenAI %s: junk output, rotating.", slug)  
                 continue  
             return out, slug  
         except Exception as e:  # noqa: BLE001  
             last_err = e  
-            logger.warning("OpenRouter %s failed: %s", slug, e)  
+            logger.warning("OpenAI %s failed: %s", slug, e)  
             await asyncio.sleep(RETRY_DELAY)  
-    raise RuntimeError(f"OpenRouter tier '{tier}' exhausted: {last_err}")  
+    raise RuntimeError(f"OpenAI tier '{tier}' exhausted: {last_err}")  
   
   
-async def _openrouter_once(slug: str, prompt: str, attachments) -> str:  
-    body = {  
-        "model": slug,  
-        "messages": [{"role": "user",  
-                      "content": _or_content(prompt, attachments, slug)}],  
-    }  
-    if slug in REASONING_MODELS:  
-        body["reasoning"] = {"enabled": True}  
+async def _openai_once(slug: str, prompt: str, attachments) -> str:  
     r = await runtime.http_client.post(  
-        "https://openrouter.ai/api/v1/chat/completions",  
-        headers={  
-            "Authorization": f"Bearer {runtime.cfg.openrouter_key}",  
-            "HTTP-Referer": "http://192.168.1.6:8000",  
-            "X-Title": "DizerCore.AI",  
+        "https://api.openai.com/v1/chat/completions",  
+        headers={"Authorization": f"Bearer {runtime.cfg.openai_key}"},  
+        json={  
+            "model": slug,  
+            "messages": [{"role": "user",  
+                          "content": _vision_content(prompt, attachments,  
+                                                     slug)}],  
         },  
-        json=body,  
     )  
-    if r.status_code in (401, 402, 403, 429):  
-        raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:300]}")  
+    if r.status_code in (401, 402, 403, 404, 429):  
+        raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:300]}")  
     r.raise_for_status()  
     return r.json()["choices"][0]["message"].get("content") or ""  
   
@@ -258,8 +225,7 @@ async def _groq_stream_once(slug: str, prompt: str, attachments,
             if payload == "[DONE]":  
                 break  
             try:  
-                delta = __import__("json").loads(  
-                    payload)["choices"][0].get("delta") or {}  
+                delta = json.loads(payload)["choices"][0].get("delta") or {}  
             except Exception:  
                 continue  
             if delta.get("content"):  
@@ -337,13 +303,7 @@ async def _gemini_once_stream(slug: str, prompt: str, attachments,
                     out_text += getattr(p, "text", "") or ""  
         return out_text, out_think  
   
-    # Consume in a thread; update job.steps periodically for live display.  
-    async def _poll_drain():  
-        nonlocal text, thinking  
-        result = await asyncio.to_thread(_consume)  
-        text, thinking = result  
-  
-    await _poll_drain()  
+    text, thinking = await asyncio.to_thread(_consume)  
     if job is not None and key:  
         job.steps[key] = text  
         job.steps[key + "_thinking"] = thinking  
@@ -383,9 +343,11 @@ async def _gemini_once(slug: str, prompt: str, attachments) -> str:
   
   
 # ---------------------------------------------------------------------------  
-# Judge pool — serial, dedicated judge key, rotation via start_index  
+# Judge pool — serial, dedicated OpenRouter judge key, rotation via  
+# start_index. Reasoning is enabled UNCONDITIONALLY: every judge slug in the  
+# pool accepts reasoning:{"enabled":true}.  
 # ---------------------------------------------------------------------------  
-_CONF_MAX_TOKENS = 2048  # reasoning judges think before emitting SCORE:  
+_CONF_MAX_TOKENS = 4096  # reasoning judges think before emitting SCORE:  
   
 _CONF_PROMPT = (  
     "You are an impartial judge. Rate from 0 to 100 how well the CODE "  
@@ -428,9 +390,8 @@ async def _judge_once(slug: str, request: str, code: str):
             "messages": [{"role": "user",  
                           "content": _CONF_PROMPT.format(  
                               req=request, code=code)}],  
+            "reasoning": {"enabled": True},   # all judge slugs support this  
         }  
-        if slug in REASONING_MODELS:  
-            body["reasoning"] = {"enabled": True}  
         r = await runtime.http_client.post(  
             "https://openrouter.ai/api/v1/chat/completions",  
             headers={  
