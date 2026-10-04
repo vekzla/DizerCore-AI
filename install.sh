@@ -7,7 +7,9 @@
 # then ALWAYS wipes the picked disk clean (new GPT label + single ext4  
 # partition) after a typed ERASE confirmation. Mounts by UUID at  
 # /mnt/dizerdata, writes the env file (OpenAI coder key + Groq + Gemini +  
-# required OpenRouter JUDGE key), installs the systemd service.  
+# required OpenRouter JUDGE key), optionally configures the pi2 build  
+# executor (SSH keygen + smoke test -> BUILD_* env vars), installs the  
+# systemd service.
 #  
 # KEY BACKUP: the env file (API keys + admin password) is backed up to  
 # ~/dizercore.env.bak on the SD card, so reinstalls can restore keys  
@@ -354,9 +356,73 @@ else
   set_env "PORT"                 "$PORT"  
   ok "Admin password and paths updated in ${ENV_FILE}"  
 fi  
+
+# ==================================================================  
+# 9 Two-Pi build executor (optional) — pi2 "tadashi"  
+#     SSH keypair + reachability smoke test. Executor must already be  
+#     set up on pi2 (install-executor.sh). Blank answer = disabled.  
+# ==================================================================  
+BUILD_KEY="${HOME}/.ssh/dizerbuild_ed25519"  
+BUILD_HOST=""  
+BUILD_ENABLED="false"  
+  
+echo ""  
+read -r -p "pi2 build executor IP/hostname (blank = disabled): " BUILD_HOST </dev/tty || true  
+BUILD_HOST="${BUILD_HOST//|/}"   # '|' is the set_env sed delimiter  
+  
+if [ -n "$BUILD_HOST" ]; then  
+  ok "Setting up SSH key for build executor at ${BUILD_HOST}"  
+  
+  mkdir -p "${HOME}/.ssh"  
+  chmod 700 "${HOME}/.ssh"  
+  if [ ! -f "$BUILD_KEY" ]; then  
+    ssh-keygen -t ed25519 -N "" -f "$BUILD_KEY" -C "edith->tadashi" >/dev/null  
+    ok "Generated ${BUILD_KEY}"  
+  else  
+    ok "Reusing existing key ${BUILD_KEY}"  
+  fi  
+  
+  echo ""  
+  banner "Add this public key on tadashi"  
+  echo " On pi2, append the line below to:"  
+  echo "   /home/dizerbuild/.ssh/authorized_keys"  
+  echo " (install-executor.sh creates the dizerbuild user and .ssh dir)"  
+  echo ""  
+  cat "${BUILD_KEY}.pub"  
+  echo ""  
+  read -r -p "Press ENTER once the key is installed on pi2... " _ </dev/tty || true  
+  
+  # Smoke test — BatchMode=yes so it fails fast instead of prompting.  
+  if ssh -i "$BUILD_KEY" -o BatchMode=yes -o ConnectTimeout=8 \  
+         -o StrictHostKeyChecking=accept-new \  
+         dizerbuild@"$BUILD_HOST" true 2>/dev/null; then  
+    ok "SSH smoke test passed — build executor reachable"  
+    BUILD_ENABLED="true"  
+  else  
+    warn "SSH to dizerbuild@${BUILD_HOST} failed — leaving BUILD_ENABLED=false."  
+    warn "Check: tadashi powered on, install-executor.sh ran, key added to"  
+    warn "/home/dizerbuild/.ssh/authorized_keys. Re-run installer to retry."  
+  fi  
+  
+  set_env "BUILD_HOST"     "$BUILD_HOST"  
+  set_env "BUILD_USER"     "dizerbuild"  
+  set_env "BUILD_KEY_PATH" "$BUILD_KEY"  
+  set_env "BUILD_ROOT"     "/mnt/build"  
+else  
+  ok "Build executor skipped — builds disabled"  
+fi  
+  
+# Always write the switch + defaults so the env file is self-describing.  
+set_env "BUILD_ENABLED"     "$BUILD_ENABLED"  
+set_env "BUILD_MAX_RETRIES" "2"  
+set_env "BUILD_TIMEOUT_S"   "600"  
+set_env "BUILD_TIMEOUT_TREE" "7200"  
+set_env "BUILD_JOBS"        "4"  
+set_env "BUILD_MEM_MB"      "3072"  
+set_env "BUILD_CPU_S"       "3600"
   
 # ==================================================================  
-# 9. Install systemd service  
+# 10. Install systemd service  
 # ==================================================================  
 ok "Installing systemd service"  
 {  
@@ -385,7 +451,7 @@ sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"  
   
 # ==================================================================  
-# 10. Print the URL  
+# 11. Print the URL  
 # ==================================================================  
 IP="$(hostname -I | awk '{print $1}')"  
 echo ""  
