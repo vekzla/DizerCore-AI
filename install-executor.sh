@@ -8,9 +8,9 @@
 #  
 #   1. Asks for the Code-Agent's IP (the pi that will SSH in).  
 #   2. Detects NVMe/SSD (excludes SD card / boot disk), user picks,  
-#      typed ERASE -> GPT + ext4 labelled "DizerBuild".  
+#      typed ERASE -> GPT + ext4 labelled "DizerCoreBuild".  
 #   3. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
-#   4. Creates "dizerbuild" user + ~/.ssh/authorized_keys.  
+#   4. Creates "dizercorebuild" user + ~/.ssh/authorized_keys.  
 #   5. Installs a full build toolchain: C/C++ (gcc/g++, make, cmake,  
 #      ninja, autoconf, pkg-config + common -dev libs), Python 3 + venv  
 #      + pip, Node.js + npm, Go, Rust (cargo), Java (default-jdk) —  
@@ -21,16 +21,16 @@
 #      on the Code-Agent.  
 #  
 # Command contract (Code-Agent side, pipeline._remote_build):  
-#   rsync -az -e "ssh -i KEY" <pkgdir>/  dizerbuild@IP:/mnt/build/jobs/<id>/  
-#   ssh  -i KEY dizerbuild@IP prlimit --as=<MB>m --cpu=<S> \  
+#   rsync -az -e "ssh -i KEY" <pkgdir>/  dizercorebuild@IP:/mnt/build/jobs/<id>/  
+#   ssh  -i KEY dizercorebuild@IP prlimit --as=<MB>m --cpu=<S> \  
 #        bwrap --unshare-all --bind /mnt/build/jobs/<id> /work \  
 #        --chdir /work --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"  
 # ==================================================================  
 set -Eeuo pipefail  
   
-BUILD_USER="dizerbuild"  
+BUILD_USER="dizercorebuild"  
 BUILD_ROOT="/mnt/build"  
-NVME_LABEL="DizerBuild"  
+NVME_LABEL="DizerCoreBuild"  
 USER_HOME="/home/${BUILD_USER}"  
   
 # Repo pulled into the bare repo for tree-mode builds — override with  
@@ -86,10 +86,7 @@ pick_build_disk() {
     [[ "$dev" == /dev/loop*   || "$dev" == /dev/zram* ]] && continue  
     [[ "$(basename "$dev")" == "$root_disk" ]] && continue  # boot disk  
     disks+=("${dev}  ${sz}")  
-  done < <(lsblk -b -d -n -o PATH,SIZE 2>/dev/null | \  
-           while read -r path size; do  
-             echo "$path $(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size")"  
-           done)  
+  done < <(lsblk -b -d -n -o PATH,SIZE 2>/dev/null | while read -r path size; do echo "$path $(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size")"; done)  
   [ "${#disks[@]}" -gt 0 ] || die "No non-boot disk found — is the NVMe/SSD attached?"  
   
   if [ "${#disks[@]}" -eq 1 ]; then  
@@ -148,24 +145,23 @@ EXEC_IP="$REPLY_IP"
   
 # ==================================================================  
 # 1. System dependencies + full build toolchain  
+#    NOTE: one install per line — no backslash continuations. A stray  
+#    space after a \ turns it into an escaped space and apt gets an  
+#    empty package name ("Unable to locate package").  
 # ==================================================================  
 ok "Installing system dependencies"  
 sudo apt-get update -y  
-sudo apt-get install -y \  
-  git rsync curl ca-certificates \  
-  build-essential gcc g++ make cmake ninja-build \  
-  autoconf automake libtool pkg-config \  
-  python3 python3-venv python3-pip python3-dev \  
-  nodejs npm golang-go rustc cargo default-jdk-headless \  
-  libssl-dev libffi-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \  
-  bubblewrap util-linux parted \  
-  openssh-server || die "Package install failed — see apt output above."  
-  
-# dizerbuild needs pip/venv + per-project dirs it can write.  
-sudo -u "$BUILD_USER" true 2>/dev/null || true  
+sudo apt-get install -y git rsync curl ca-certificates || die "apt failed: base tools"  
+sudo apt-get install -y build-essential gcc g++ make cmake ninja-build || die "apt failed: C/C++ toolchain"  
+sudo apt-get install -y autoconf automake libtool pkg-config || die "apt failed: autotools"  
+sudo apt-get install -y python3 python3-venv python3-pip python3-dev || die "apt failed: python"  
+sudo apt-get install -y nodejs npm golang-go rustc cargo || die "apt failed: node/go/rust"  
+sudo apt-get install -y default-jdk-headless || warn "default-jdk-headless missing — Java builds unavailable"  
+sudo apt-get install -y libssl-dev libffi-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev || die "apt failed: -dev libs"  
+sudo apt-get install -y bubblewrap util-linux parted openssh-server || die "apt failed: sandbox deps"  
   
 # ==================================================================  
-# 2. NVMe — pick, ERASE-wipe, format as DizerBuild  
+# 2. NVMe — pick, ERASE-wipe, format as DizerCoreBuild  
 # ==================================================================  
 BLK_DISK=""  
 BLK_PART=""  
@@ -189,7 +185,7 @@ sudo mount -a
 findmnt "$BUILD_ROOT" >/dev/null || die "Build volume failed to mount at ${BUILD_ROOT}"  
   
 # ==================================================================  
-# 4. dizerbuild service user + ~/.ssh (keyed from the Code-Agent)  
+# 4. dizercorebuild service user + ~/.ssh (keyed from the Code-Agent)  
 # ==================================================================  
 ok "Creating '${BUILD_USER}' service user"  
 if ! id "$BUILD_USER" &>/dev/null; then  
@@ -220,8 +216,7 @@ sudo chmod 755 "$BUILD_ROOT"
 if confirm "Pull ${REPO_URL} into ${BUILD_ROOT}/repo.git now?"; then  
   ok "Cloning ${REPO_URL} into ${BUILD_ROOT}/repo.git"  
   sudo rm -rf "${BUILD_ROOT}/repo.git"  
-  sudo -u "$BUILD_USER" git clone --bare "$REPO_URL" "${BUILD_ROOT}/repo.git" \  
-    || die "Clone failed — check the URL and network, or skip and pull later."  
+  sudo -u "$BUILD_USER" git clone --bare "$REPO_URL" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network, or skip and pull later."  
   ok "repo.git seeded at ${BUILD_ROOT}/repo.git"  
 else  
   warn "Skipped — ${BUILD_ROOT}/repo.git stays an empty bare repo."  
