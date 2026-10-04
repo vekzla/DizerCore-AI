@@ -1,23 +1,33 @@
 # DizerCore-AI  
 # ----------------------------------------------------------------------------  
 # pipeline.py — the 3-agent pipeline runner.  
-# OpenRouter, Groq, Gemini each INDEPENDENTLY write code in parallel — no  
-# cross-checking. Complexity 1-5 picks ONE tier: 1-2 light, 3 normal, 4-5 heavy.  
+# ChatGPT (OpenAI), Groq, Gemini each INDEPENDENTLY write code in parallel —  
+# no cross-checking. Complexity 1-5 picks ONE tier: 1-2 light, 3 normal,  
+# 4-5 heavy.  
 #  
-# Judging starts as soon as EACH agent finishes (not after all three). Judge  
-# access is serialized per job through an asyncio.Lock so the dedicated judge  
-# key still sees strictly serial, JUDGE_DELAY-spaced calls. Each candidate  
-# starts at a rotated JUDGE_MODELS index (OpenRouter->0, Gemini->1,  
+# Judging (OpenRouter-only pool) starts as soon as EACH agent finishes.  
+# Judge access is serialized per job through an asyncio.Lock so the dedicated  
+# judge key still sees strictly serial, JUDGE_DELAY-spaced calls. Each  
+# candidate starts at a rotated JUDGE_MODELS index (ChatGPT->0, Gemini->1,  
 # Groq->last), wrapping through the pool until a usable score lands.  
 # The highest score wins the summary; judge[0] then runs a confirmation pass.  
+#  
+# GUARDRAILS: if the entire judge pool fails, a fallback winner is picked  
+# (first non-skip output in generate/verify/final order) so downstream build  
+# stages always have something to work with. The build payload is produced  
+# ONLY through guardrails.build_package — fenced code blocks, no prose,  
+# no judge comments (summary is never a build input).  
 import asyncio  
   
 import runtime  
+import guardrails  
 from config import JUDGE_MODELS, logger, tier_for  
 from db import State, save_job  
 from providers import (  
-    gemini_generate, groq_generate, judge_confidence, openrouter_generate,  
+    gemini_generate, groq_generate, judge_confidence, openai_generate,  
 )  
+  
+_TIER_ORDER = ("light", "normal", "heavy")  
   
   
 async def _run_agent(fn, enabled: bool, prompt: str, tier: str,  
@@ -70,15 +80,55 @@ async def _agent_then_judge(job, fn, enabled, prompt, tier, skip_msg,
   
   
 def _pick_winner(job, scores):  
-    """Highest score wins; ties go to the earliest-finished candidate."""  
+    """Highest score wins; ties go to the earliest-finished candidate.  
+    Records _winner_key so the build stage knows which RAW output to feed  
+    guardrails — summary itself has judge comments appended and is NEVER  
+    used as a build input."""  
     if not scores:  
         return  
     key, conf = max(scores, key=lambda kv: kv[1])  
+    job.steps["_winner_key"] = key  
     job.steps["summary"] = job.steps.get(key, "")  
     job.steps["summary_conf"] = str(conf)  
     comments = job.steps.get(key + "_judge_comments") or ""  
     if comments:  
         job.steps["summary"] += "\n\n" + comments  
+  
+  
+def _fallback_winner(job) -> str | None:  
+    """Judge pool dead or all outputs skipped — still hand the build stage  
+    the best available raw output: first non-skip in generate/verify/final  
+    order. Returns the key or None if literally nothing was produced."""  
+    for key in ("generate", "verify", "final"):  
+        out = job.steps.get(key) or ""  
+        if out and not _is_skip(out):  
+            job.steps["_winner_key"] = key  
+            job.steps["summary"] = (  
+                out + "\n\n(unjudged — judge pool produced no usable score)")  
+            job.steps["summary_conf"] = ""  
+            return key  
+    return None  
+  
+  
+def _prepare_build(job):  
+    """Guardrail gate: turn the winning RAW output into a clean code  
+    package. Writes job.steps['build_ready'] + 'build_status'. Never raises;  
+    never lets prose/comments leave the box as 'code'."""  
+    winner_key = job.steps.get("_winner_key")  
+    raw = job.steps.get(winner_key) if winner_key else ""  
+    pkg = guardrails.build_package(raw or "")  
+    if pkg is None:  
+        job.steps["build_ready"] = ""  
+        job.steps["build_status"] = "skipped"  
+        job.steps["build_output"] = (  
+            "No runnable code extracted from agent output "  
+            "(all responses were prose or empty).")  
+        logger.info("[Job %s] build skipped — no code extracted.", job.id)  
+        return  
+    job.steps["build_ready"] = "\n\n".join(pkg["files"].values())  
+    job.steps["build_status"] = "ready"  
+    logger.info("[Job %s] build package: %d file(s).",  
+                job.id, len(pkg["files"]))  
   
   
 async def run_job(job_id: str):  
@@ -108,11 +158,11 @@ async def run_job(job_id: str):
         # return_exceptions=True: one agent blowing up must NOT cancel the  
         # other two mid-write. Failed agents land as exceptions in `results`.  
         results = await asyncio.gather(  
-            _agent_then_judge(job, openrouter_generate,  
-                              job.stages.get("openrouter", True),  
+            _agent_then_judge(job, openai_generate,  
+                              job.stages.get("openai", True),  
                               gen_prompt, tier,  
-                              "[OpenRouter skipped]\n\n" + job.prompt,  
-                              "OpenRouter", "generate", 0, lock, scores),  
+                              "[ChatGPT skipped]\n\n" + job.prompt,  
+                              "ChatGPT", "generate", 0, lock, scores),  
             _agent_then_judge(job, groq_generate,  
                               job.stages.get("groq", True),  
                               gen_prompt, tier,  
@@ -140,11 +190,15 @@ async def run_job(job_id: str):
                 if conf2:  
                     job.steps["summary_conf"] = conf2  
             if not scores:  
-                job.steps["summary"] = (  
-                    "The judge pool could not score any agent.")  
-                job.steps["summary_conf"] = ""  
+                _fallback_winner(job)  
             job.steps["summary_status"] = "done"  
-            job.touch(); save_job(job)  
+        else:  
+            # Judging disabled — still need a winner for the build gate.  
+            _fallback_winner(job)  
+        job.touch(); save_job(job)  
+  
+        _prepare_build(job)  
+        job.touch(); save_job(job)  
   
         job.state = State.DONE  
         job.touch(); save_job(job)  
