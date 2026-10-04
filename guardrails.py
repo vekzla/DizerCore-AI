@@ -64,8 +64,8 @@ def _safe_relpath(hint: str) -> str | None:
     if not hint:  
         return None  
     hint = hint.lstrip("/")  
-    if not hint or hint.startswith("..") or "/../" in f"/{hint}/" \  
-            or "\\" in hint:  
+    if (not hint or hint.startswith("..") or "/../" in f"/{hint}/"  
+            or "\\" in hint):  
         return None  
     return hint  
   
