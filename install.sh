@@ -1,19 +1,29 @@
 #!/usr/bin/env bash  
 # DizerCore-AI  
 # ==================================================================  
-# install.sh one-shot installer for Raspberry Pi 5 (headless).  
-# Auto-detects plugged-in SSDs (excludes the SD card / boot disk), lets  
-# the user pick the target, applies the UAS quirk hotfix automatically,  
-# then ALWAYS wipes the picked disk clean (new GPT label + single ext4  
-# partition) after a typed ERASE confirmation. Mounts by UUID at  
-# /mnt/dizerdata, writes the env file (OpenAI coder key + Groq + Gemini +  
-# required OpenRouter JUDGE key), optionally configures the pi2 build  
-# executor (SSH keygen + smoke test -> BUILD_* env vars), installs the  
-# systemd service.
+# install.sh — one-shot installer for Raspberry Pi 5 (headless).  
+#  
+# FIRST asks which role this machine plays:  
+#   [1] DizerCore-AI.Code-Agent  — the main pipeline pi (this script's  
+#        full install: SSD wipe/mount, repo, venv, keys, service).  
+#   [2] DizerCore-AI.Build-Agent — the remote build executor pi.  
+#        Hands off to install-executor.sh and exits.  
+#  
+# Code-Agent path:  
+#   Auto-detects plugged-in SSDs (excludes the SD card / boot disk),  
+#   lets the user pick the target, applies the UAS quirk hotfix  
+#   automatically, then ALWAYS wipes the picked disk clean (new GPT  
+#   label + single ext4 partition) after a typed ERASE confirmation.  
+#   Mounts by UUID at /mnt/dizerdata, writes the env file (OpenAI  
+#   coder key + Groq + Gemini + required OpenRouter JUDGE key),  
+#   optionally configures the Build-Agent executor by IP (SSH keygen +  
+#   smoke test -> BUILD_* env vars), installs the systemd service.  
 #  
 # KEY BACKUP: the env file (API keys + admin password) is backed up to  
 # ~/dizercore.env.bak on the SD card, so reinstalls can restore keys  
 # even though the SSD is fully wiped.  
+#  
+# BOTH pis take the other pi's IP address — no hostnames needed.  
 # ==================================================================  
 set -Eeuo pipefail  
   
@@ -37,6 +47,9 @@ USER_NAME="$(whoami)"
 QUIRK="usb-storage.quirks=152d:0578:u"  
 CMDLINE="/boot/firmware/cmdline.txt"  
   
+# Executor installer fetched when role = Build-Agent.  
+EXECUTOR_URL="https://raw.githubusercontent.com/vekzla/DizerCore-AI/main/install-executor.sh"  
+  
 # Every variable Config.from_env() requires — used by the stale-backup  
 # guard and the fresh-write block. Keep in sync with config.py.  
 REQUIRED_KEYS=(GEMINI_API_KEY OPENAI_API_KEY GROQ_API_KEY OPENROUTER_API_KEY_JUDGE)  
@@ -53,6 +66,25 @@ confirm() {
 }  
   
 require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
+  
+# ask_ip <prompt> -> sets REPLY_IP to a validated IPv4 string.  
+# Optional $2 is a pre-filled default (shown in [brackets]).  
+ask_ip() {  
+  local prompt="$1" guess="${2:-}" val=""  
+  while true; do  
+    if [ -n "$guess" ]; then  
+      read -r -p "${prompt} [${guess}]: " val </dev/tty || true  
+      val="${val:-$guess}"  
+    else  
+      read -r -p "${prompt}: " val </dev/tty || true  
+    fi  
+    val="$(echo "$val" | tr -d '[:space:]')"  
+    if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then  
+      REPLY_IP="$val"; return 0  
+    fi  
+    warn "Enter an IPv4 address like 192.168.1.50"  
+  done  
+}  
   
 # set_env KEY VALUE — rewrite KEY=VALUE in $ENV_FILE, or append if absent.  
 # Always produces exactly one line for the key.  
@@ -150,11 +182,34 @@ wipe_ssd() {
 }  
   
 # ==================================================================  
-# 0. Detect and remove a previous install  
+# 0. Role picker — one installer for both pis  
 # ==================================================================  
 banner "${APP_NAME} installer"  
 require_tty  
   
+echo ""  
+echo "Which role is this machine?"  
+echo "  [1] DizerCore-AI.Code-Agent   (runs the AI pipeline + web UI)"  
+echo "  [2] DizerCore-AI.Build-Agent  (remote build executor)"  
+while true; do  
+  read -r -p "Role [1-2]: " ROLE_CHOICE </dev/tty || true  
+  case "$ROLE_CHOICE" in  
+    1)  
+      ok "Role: DizerCore-AI.Code-Agent"  
+      break  
+      ;;  
+    2)  
+      ok "Role: DizerCore-AI.Build-Agent — fetching install-executor.sh"  
+      curl -fsSL "${EXECUTOR_URL}?nocache=$(date +%s)" | tr -d '\r' | bash  
+      exit $?  
+      ;;  
+  esac  
+  warn "Enter 1 or 2."  
+done  
+  
+# ==================================================================  
+# 1. Detect and remove a previous install  
+# ==================================================================  
 PREV=0  
 systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}.service" && PREV=1  
 [ -d "$APP_DIR" ] && PREV=1  
@@ -202,14 +257,14 @@ if ! confirm "Proceed with a fresh install of ${APP_NAME}?"; then
 fi  
   
 # ==================================================================  
-# 1. System deps  
+# 2. System deps  
 # ==================================================================  
 ok "Installing system dependencies"  
 sudo apt-get update -y  
-sudo apt-get install -y git python3-venv python3-pip util-linux parted  
+sudo apt-get install -y git python3-venv python3-pip util-linux parted curl  
   
 # ==================================================================  
-# 2. UAS quirk hotfix — applied AUTOMATICALLY; requires one reboot,  
+# 3. UAS quirk hotfix — applied AUTOMATICALLY; requires one reboot,  
 #    then re-run this installer.  
 # ==================================================================  
 if ! grep -q "$QUIRK" "$CMDLINE" 2>/dev/null; then  
@@ -222,7 +277,7 @@ if ! grep -q "$QUIRK" "$CMDLINE" 2>/dev/null; then
 fi  
   
 # ==================================================================  
-# 3. Detect the SSD — then ALWAYS wipe it clean (typed ERASE required)  
+# 4. Detect the SSD — then ALWAYS wipe it clean (typed ERASE required)  
 # ==================================================================  
 SSD_DEV=""  
 SSD_DISK=""  
@@ -233,7 +288,7 @@ wipe_ssd
 ok "Wipe complete; using ${SSD_PART}"  
   
 # ==================================================================  
-# 4. Mount the SSD by UUID  
+# 5. Mount the SSD by UUID  
 # ==================================================================  
 ok "Mounting the SSD"  
 NEW_UUID="$(sudo blkid -s UUID -o value "$SSD_PART")"  
@@ -250,7 +305,7 @@ sudo mkdir -p "$DATA_DIR"
 sudo chown "$USER_NAME:$USER_NAME" "$DATA_DIR"  
   
 # ==================================================================  
-# 5. Clone repo + stamp version + freshness check  
+# 6. Clone repo + stamp version + freshness check  
 # ==================================================================  
 ok "Cloning ${REPO}"  
 git clone --branch "$BRANCH" "$REPO" "$APP_DIR"  
@@ -278,7 +333,7 @@ if [ ! -f "$APP_DIR/static/dizercore.png" ]; then
 fi  
   
 # ==================================================================  
-# 6. Python venv + deps  
+# 7. Python venv + deps  
 # ==================================================================  
 ok "Setting up Python venv"  
 python3 -m venv "$APP_DIR/venv"  
@@ -290,7 +345,7 @@ else
 fi  
   
 # ==================================================================  
-# 7. API keys — restore from SD backup if the user says yes,  
+# 8. API keys — restore from SD backup if the user says yes,  
 #    otherwise prompt and save a fresh backup.  
 #    The WEB UI ADMIN password is ALWAYS asked, even on key restore.  
 # ==================================================================  
@@ -328,7 +383,7 @@ read -r -p "Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PA
 WEBUI_ADMIN_PASSWORD="${WEBUI_ADMIN_PASSWORD//|/}"  
   
 # ==================================================================  
-# 8. Write env file  
+# 9. Write env file  
 # ==================================================================  
 if [ "$SKIP_KEYS" -eq 0 ]; then  
   ok "Writing env file"  
@@ -356,51 +411,55 @@ else
   set_env "PORT"                 "$PORT"  
   ok "Admin password and paths updated in ${ENV_FILE}"  
 fi  
-
+  
 # ==================================================================  
-# 9 Two-Pi build executor (optional) — pi2 "tadashi"  
-#     SSH keypair + reachability smoke test. Executor must already be  
-#     set up on pi2 (install-executor.sh). Blank answer = disabled.  
+# 10. DizerCore-AI.Build-Agent (optional) — remote build executor pi.  
+#     SSH keypair + reachability smoke test by IP. The Build-Agent pi  
+#     must already be set up (install-executor.sh — it prints its IP  
+#     at the end). Blank answer = disabled.  
 # ==================================================================  
 BUILD_KEY="${HOME}/.ssh/dizerbuild_ed25519"  
 BUILD_HOST=""  
 BUILD_ENABLED="false"  
   
 echo ""  
-read -r -p "pi2 build executor IP/hostname (blank = disabled): " BUILD_HOST </dev/tty || true  
-BUILD_HOST="${BUILD_HOST//|/}"   # '|' is the set_env sed delimiter  
+echo "The Build-Agent prints its IP at the end of install-executor.sh."  
+ask_ip "Build-Agent IP address (type 0.0.0.0 to skip)" ""  
   
-if [ -n "$BUILD_HOST" ]; then  
-  ok "Setting up SSH key for build executor at ${BUILD_HOST}"  
+if [ "$REPLY_IP" = "0.0.0.0" ]; then  
+  ok "Build executor skipped — builds disabled"  
+else  
+  BUILD_HOST="$REPLY_IP"  
+  ok "Setting up SSH key for Build-Agent at ${BUILD_HOST}"  
   
   mkdir -p "${HOME}/.ssh"  
   chmod 700 "${HOME}/.ssh"  
   if [ ! -f "$BUILD_KEY" ]; then  
-    ssh-keygen -t ed25519 -N "" -f "$BUILD_KEY" -C "edith->tadashi" >/dev/null  
+    ssh-keygen -t ed25519 -N "" -f "$BUILD_KEY" -C "code-agent->build-agent" >/dev/null  
     ok "Generated ${BUILD_KEY}"  
   else  
     ok "Reusing existing key ${BUILD_KEY}"  
   fi  
   
   echo ""  
-  banner "Add this public key on tadashi"  
-  echo " On pi2, append the line below to:"  
+  banner "Add this public key on the Build-Agent (${BUILD_HOST})"  
+  echo " On the Build-Agent pi, append the line below to:"  
   echo "   /home/dizerbuild/.ssh/authorized_keys"  
-  echo " (install-executor.sh creates the dizerbuild user and .ssh dir)"  
+  echo " (install-executor.sh created the dizerbuild user and .ssh dir)"  
   echo ""  
   cat "${BUILD_KEY}.pub"  
   echo ""  
-  read -r -p "Press ENTER once the key is installed on pi2... " _ </dev/tty || true  
+  read -r -p "Press ENTER once the key is installed on the Build-Agent... " _ </dev/tty || true  
   
   # Smoke test — BatchMode=yes so it fails fast instead of prompting.  
   if ssh -i "$BUILD_KEY" -o BatchMode=yes -o ConnectTimeout=8 \  
          -o StrictHostKeyChecking=accept-new \  
          dizerbuild@"$BUILD_HOST" true 2>/dev/null; then  
-    ok "SSH smoke test passed — build executor reachable"  
+    ok "SSH smoke test passed — Build-Agent reachable"  
     BUILD_ENABLED="true"  
   else  
     warn "SSH to dizerbuild@${BUILD_HOST} failed — leaving BUILD_ENABLED=false."  
-    warn "Check: tadashi powered on, install-executor.sh ran, key added to"  
+    warn "Check: Build-Agent powered on, install-executor.sh ran, key added to"  
     warn "/home/dizerbuild/.ssh/authorized_keys. Re-run installer to retry."  
   fi  
   
@@ -408,21 +467,19 @@ if [ -n "$BUILD_HOST" ]; then
   set_env "BUILD_USER"     "dizerbuild"  
   set_env "BUILD_KEY_PATH" "$BUILD_KEY"  
   set_env "BUILD_ROOT"     "/mnt/build"  
-else  
-  ok "Build executor skipped — builds disabled"  
 fi  
   
 # Always write the switch + defaults so the env file is self-describing.  
-set_env "BUILD_ENABLED"     "$BUILD_ENABLED"  
-set_env "BUILD_MAX_RETRIES" "2"  
-set_env "BUILD_TIMEOUT_S"   "600"  
+set_env "BUILD_ENABLED"      "$BUILD_ENABLED"  
+set_env "BUILD_MAX_RETRIES"  "2"  
+set_env "BUILD_TIMEOUT_S"    "600"  
 set_env "BUILD_TIMEOUT_TREE" "7200"  
-set_env "BUILD_JOBS"        "4"  
-set_env "BUILD_MEM_MB"      "3072"  
-set_env "BUILD_CPU_S"       "3600"
+set_env "BUILD_JOBS"         "4"  
+set_env "BUILD_MEM_MB"       "3072"  
+set_env "BUILD_CPU_S"        "3600"  
   
 # ==================================================================  
-# 10. Install systemd service  
+# 11. Install systemd service  
 # ==================================================================  
 ok "Installing systemd service"  
 {  
@@ -451,11 +508,16 @@ sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"  
   
 # ==================================================================  
-# 11. Print the URL  
+# 12. Print the URL  
 # ==================================================================  
 IP="$(hostname -I | awk '{print $1}')"  
 echo ""  
-banner "${APP_NAME} is running"  
+banner "${APP_NAME} Code-Agent is running"  
 echo " Open:       http://${IP}:${PORT}/"  
 echo " Live logs:  journalctl -u ${SERVICE_NAME} -f"  
+if [ "$BUILD_ENABLED" = "true" ]; then  
+  echo " Builds:     remote on Build-Agent at ${BUILD_HOST}"  
+else  
+  echo " Builds:     disabled (no Build-Agent configured)"  
+fi  
 echo "============================================================"
