@@ -169,12 +169,10 @@ async def index(request: Request):
         return RedirectResponse("/login", status_code=303)  
     return HTMLResponse(DASHBOARD_HTML)  
   
-  
-@router.post("/run")  
+  @router.post("/run")  
 async def run(  
     request: Request,  
     prompt: str = Form(...),  
-    complexity: int = Form(3),  
     openai: str = Form("on"),  
     groq: str = Form("on"),  
     gemini: str = Form("on"),  
@@ -191,7 +189,7 @@ async def run(
   
     build_repo = _check_build_repo(build_repo) if build == "on" else ""  
   
-job = Job(  
+    job = Job(  
         id=uuid.uuid4().hex[:12],  
         owner=user,  
         prompt=prompt,  
@@ -201,8 +199,8 @@ job = Job(
                 "gemini": gemini == "on",  
                 "inkling": inkling == "on",  
                 "build": build == "on"},  
-    )
-
+    )  
+  
     if build_repo:  
         job.stages["build_repo"] = build_repo  
     if build_cmd.strip():  
@@ -228,7 +226,6 @@ job = Job(
     logger.info("[Job %s] queued by %s", job.id, user)  
     return JSONResponse({"job_id": job.id})  
   
-  
 @router.get("/jobs")  
 async def list_jobs(request: Request):  
     user = _require_user(request)  
@@ -241,8 +238,7 @@ async def list_jobs(request: Request):
          "title": (j.prompt[:60] + ("…" if len(j.prompt) > 60 else ""))}  
         for j in mine  
     ])  
-  
-  
+    
 @router.delete("/jobs/{job_id}")  
 async def delete_job(job_id: str, request: Request):  
     user = _require_user(request)  
@@ -265,7 +261,6 @@ def _job_payload(job: Job) -> dict:
         "steps": job.steps, "updated_at": job.updated_at,  
     }  
   
-  
 @router.get("/status/{job_id}")  
 async def status(job_id: str, request: Request):  
     user = _require_user(request)  
@@ -273,7 +268,6 @@ async def status(job_id: str, request: Request):
     if not job or job.owner != user:  
         raise HTTPException(status_code=404, detail="Job not found.")  
     return JSONResponse(_job_payload(job))  
-  
   
 @router.get("/status/stream/{job_id}")  
 async def status_stream(job_id: str, request: Request):  
