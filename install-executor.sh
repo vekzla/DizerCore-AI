@@ -3,202 +3,225 @@
 # ==================================================================  
 # install-executor.sh — installer for the DizerCore-AI.Build-Agent pi  
 # (the remote build executor). Normally reached via install.sh's role  
-# picker, but also runnable directly:  
-#   curl -fsSL ".../install-executor.sh?nocache=$(date +%s)" | tr -d '\r' | bash  
+# picker, but also runnable directly.  
 #  
-#   1. Asks for the Code-Agent's IP (the pi that will SSH in).  
-#   2. Lists ALL non-boot disks, user picks by number, typed ERASE ->  
+#   1. Detects a previous install and offers: wipe clean / reuse.  
+#   2. Asks for the Code-Agent's IP (the pi that will SSH in).  
+#   3. Lists ALL non-boot disks, user picks by number, typed ERASE ->  
 #      GPT + ext4 labelled "DizerCoreBuild". Re-run safe: unmounts  
 #      existing mounts of the disk first.  
-#   3. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
-#   4. Creates "dizercorebuild" user + ~/.ssh/authorized_keys.  
-#   5. Installs a full build toolchain: C/C++ (gcc/g++, make, cmake,  
+#   4. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
+#   5. Creates "dizercorebuild" user + ~/.ssh/authorized_keys  
+#      (preserved on "reuse" so the Code-Agent key survives).  
+#   6. Installs a full build toolchain: C/C++ (gcc/g++, make, cmake,  
 #      ninja, autoconf, pkg-config + common -dev libs), Python 3 + venv  
-#      + pip, Node.js + npm, Go, Rust (cargo), Java (default-jdk) —  
-#      plus sandbox deps (bwrap, prlimit).  
-#   6. Creates /mnt/build/jobs/ + /mnt/build/repo.git, then ASKS the  
-#      user for a repo URL to clone --bare into it (tree-mode seed);  
-#      blank answer skips the pull entirely.  
-#   7. Prints THIS machine's IP — enter it into install.sh section 9  
-#      on the Code-Agent.  
+#      + pip, Node.js + npm, Go, Rust (cargo), Java (default-jdk) --  
+#      plus sandbox deps: bubblewrap + util-linux (prlimit).  
+#   7. Creates /mnt/build/jobs + /mnt/build/repo.git (bare).  
+#   8. Asks the user for a repo URL AND optional branch to seed into  
+#      repo.git (blank URL = skip; blank branch = repo default).  
+#   9. Prints THIS machine's IP -- enter it into install.sh section 10  
+#      on the Code-Agent, then paste the Code-Agent's pubkey into  
+#      ~dizercorebuild/.ssh/authorized_keys.  
 #  
-# Command contract (Code-Agent side, pipeline._remote_build):  
-#   rsync -az -e "ssh -i KEY" <pkgdir>/  dizercorebuild@IP:/mnt/build/jobs/<id>/  
-#   ssh  -i KEY dizercorebuild@IP  runs:  
-#        prlimit --as=<MB>m --cpu=<S> bwrap --unshare-all  
-#          --bind /mnt/build/jobs/<id> /work --chdir /work  
-#          --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"  
-#   (pipeline.py passes the ssh args as a single argv array — no shell  
-#    join on the edith side; <cmd> runs as a remote shell string)  
+# sshd on this pi must be reachable on port 22 from the Code-Agent.  
 # ==================================================================  
-set -Eeuo pipefail  
+set -euo pipefail  
   
-BUILD_USER="dizercorebuild"  
+ok()   { printf '\033[1;32m==>\033[0m %s\n' "$*"; }  
+warn() { printf '\033[1;33m!!\033[0m %s\n'  "$*"; }  
+die()  { printf '\033[1;31mXX\033[0m %s\n'  "$*"; exit 1; }  
+  
+banner() { echo "============================================================"; echo " $*"; echo "============================================================"; }  
+  
 BUILD_ROOT="/mnt/build"  
 NVME_LABEL="DizerCoreBuild"  
-USER_HOME="/home/${BUILD_USER}"  
+BUILD_USER="dizercorebuild"  
   
-CODE_IP=""  
-EXEC_IP=""  
-  
-banner() { echo "============================================================"; echo " $1"; echo "============================================================"; }  
-ok()   { echo "==> $1"; }  
-warn() { echo "!!  $1" >&2; }  
-die()  { echo "XX  $1" >&2; exit 1; }  
-  
-confirm() {  
-  local reply=""  
-  read -r -p "$1 [y/N] " reply </dev/tty || true  
-  [[ "$reply" =~ ^[Yy]$ ]]  
-}  
-  
-require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
+banner "DizerCore-AI Build-Agent installer"  
+echo ""  
   
 ask_ip() {  
-  # ask_ip <prompt> [default] -> sets REPLY_IP to a validated IPv4 string  
-  local prompt="$1" guess="${2:-}" val=""  
-  while true; do  
-    if [ -n "$guess" ]; then  
-      read -r -p "${prompt} [${guess}]: " val </dev/tty || true  
-      val="${val:-$guess}"  
+  local var="$1" prompt="$2" default="${3:-}" v=""  
+  while :; do  
+    if [ -n "$default" ]; then  
+      read -r -p "${prompt} [${default}]: " v </dev/tty || true  
+      v="${v:-$default}"  
     else  
-      read -r -p "${prompt}: " val </dev/tty || true  
+      read -r -p "${prompt}: " v </dev/tty || true  
     fi  
-    val="$(echo "$val" | tr -d '[:space:]')"  
-    if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then  
-      REPLY_IP="$val"; return 0  
-    fi  
-    warn "Enter an IPv4 address like 192.168.1.50"  
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && { printf -v "$var" "%s" "$v"; return; }  
+    echo "Enter a valid IPv4 address (e.g. 192.168.1.6)."  
   done  
 }  
   
-# ------------------------------------------------------------------  
-# pick_build_disk — list every non-boot disk, ALWAYS ask which one.  
-# ------------------------------------------------------------------  
-pick_build_disk() {  
-  local root_src root_disk  
-  root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
-  root_disk="$(basename "$(lsblk -n -o PKNAME "$root_src" 2>/dev/null || echo "")")"  
-  [ -n "$root_disk" ] || root_disk="$(lsblk -n -o NAME | head -n1)"  
+confirm() {  
+  local a=""  
+  read -r -p "$* [y/N]: " a </dev/tty || true  
+  [[ "$a" =~ ^[Yy]$ ]]  
+}  
   
-  local disks=() dev sz  
-  while read -r dev sz; do  
-    [[ "$dev" == /dev/mmcblk* ]] && continue           # SD card  
-    [[ "$dev" == /dev/loop*   || "$dev" == /dev/zram* ]] && continue  
-    [[ "$(basename "$dev")" == "$root_disk" ]] && continue  # boot disk  
-    disks+=("${dev}  ${sz}")  
-  done < <(lsblk -b -d -n -o PATH,SIZE 2>/dev/null | while read -r path size; do echo "$path $(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size")"; done)  
-  [ "${#disks[@]}" -gt 0 ] || die "No non-boot disk found — is the NVMe/SSD attached?"  
+# ==================================================================  
+# 0. Previous install?  Offer wipe-clean or reuse (like install.sh)  
+# ==================================================================  
+PREV_INSTALL="no"  
+if id "$BUILD_USER" >/dev/null 2>&1 || findmnt -rn "$BUILD_ROOT" >/dev/null 2>&1; then  
+  PREV_INSTALL="yes"  
+fi  
   
+FRESH_WIPE="yes"  
+if [ "$PREV_INSTALL" = "yes" ]; then  
+  banner "Previous Build-Agent install detected"  
+  echo " Found: $([ "$(id "$BUILD_USER" 2>/dev/null)" ] && echo "user '${BUILD_USER}' " )$(findmnt -rn "$BUILD_ROOT" >/dev/null 2>&1 && echo "mounted ${BUILD_ROOT}")"  
   echo ""  
-  echo "Available build disks (boot disk excluded):"  
-  local i=1  
-  for d in "${disks[@]}"; do echo "  [$i] $d"; i=$((i+1)); done  
-  local n=""  
-  while true; do  
-    read -r -p "Build disk number [1-${#disks[@]}]: " n </dev/tty || true  
-    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#disks[@]}" ] && break  
-    warn "Enter a number 1-${#disks[@]}"  
+  echo "  [1] WIPE previous install  (fresh disk format, fresh keys)"  
+  echo "  [2] REUSE                  (keep user + SSH key; reformat disk)"  
+  local_pick=""  
+  while :; do  
+    read -r -p "Previous install [1-2]: " local_pick </dev/tty || true  
+    case "$local_pick" in  
+      1) FRESH_WIPE="yes"; break;;  
+      2) FRESH_WIPE="no";  break;;  
+      *) echo "Pick 1 or 2.";;  
+    esac  
   done  
-  BLK_DISK="${disks[$((n-1))]%%  *}"  
-}  
-  
-wipe_build_disk() {  
-  warn "ALL DATA on ${BLK_DISK} WILL BE ERASED"  
-  lsblk "$BLK_DISK" || true  
-  local ans=""  
-  read -r -p "Type ERASE to wipe ${BLK_DISK}: " ans </dev/tty || true  
-  [ "$ans" = "ERASE" ] || die "Wipe aborted."  
-  
-  # Re-run safe: unmount every mountpoint on this disk first.  
-  local mnt=""  
-  while read -r mnt; do  
-    [ -n "$mnt" ] || continue  
-    warn "Unmounting ${mnt} (re-install)"  
-    sudo umount "$mnt" || die "Could not unmount ${mnt} — close anything using it and re-run."  
-  done < <(lsblk -n -o MOUNTPOINT "$BLK_DISK" 2>/dev/null | grep -v '^$' || true)  
-  sudo sed -i "\| ${BUILD_ROOT} |d" /etc/fstab  
-  sudo systemctl daemon-reload 2>/dev/null || true  
-  
-  sudo wipefs -a "$BLK_DISK"  
-  sudo parted -s "$BLK_DISK" mklabel gpt  
-  sudo parted -s "$BLK_DISK" mkpart primary ext4 0% 100%  
-  sudo partprobe "$BLK_DISK" || true  
-  sleep 1  
-  
-  # Partition node: nvme/mmcblk/loop append 'p1'; sda/sdb append '1'.  
-  if [[ "$(basename "$BLK_DISK")" =~ ^(nvme|mmcblk|loop) ]]; then  
-    BLK_PART="${BLK_DISK}p1"  
+  if [ "$FRESH_WIPE" = "no" ]; then  
+    warn "Reusing '${BUILD_USER}' user and ~/.ssh/authorized_keys."  
+    warn "The Code-Agent will NOT need its pubkey re-pasted."  
   else  
-    BLK_PART="${BLK_DISK}1"  
+    warn "Fresh wipe: '${BUILD_USER}' will be deleted and recreated;"  
+    warn "you must re-paste the Code-Agent pubkey afterwards."  
   fi  
-  [ -b "$BLK_PART" ] || die "Expected partition ${BLK_PART} not found."  
-  
-  sudo mkfs.ext4 -F -L "$NVME_LABEL" "$BLK_PART"  
-}  
-  
-# ==================================================================  
-# 0. Preamble — both pis' IPs  
-# ==================================================================  
-banner "DizerCore-AI Build-Agent installer"  
-require_tty  
+fi  
   
 echo ""  
 echo "This pi is the Build-Agent. The other pi runs the Code-Agent"  
 echo "(the DizerCore pipeline that SSHes in to run builds)."  
-ask_ip "Code-Agent IP address"  
-CODE_IP="$REPLY_IP"  
-ask_ip "This Build-Agent's IP" "$(hostname -I | awk '{print $1}')"  
-EXEC_IP="$REPLY_IP"  
+ask_ip CODE_IP "Code-Agent IP address"  
+ask_ip EXEC_IP "This Build-Agent's IP" "$(hostname -I | awk '{print $1}')"  
   
 # ==================================================================  
-# 1. System dependencies + full build toolchain  
-#    NOTE: one install per line — no backslash continuations. A stray  
-#    space after a \ turns it into an escaped space and apt gets an  
-#    empty package name ("Unable to locate package").  
+# 1. Build toolchain + sandbox deps (single-line apt calls)  
 # ==================================================================  
-ok "Installing system dependencies"  
+ok "Installing build toolchain"  
 sudo apt-get update -y  
-sudo apt-get install -y git rsync curl ca-certificates || die "apt failed: base tools"  
-sudo apt-get install -y build-essential gcc g++ make cmake ninja-build || die "apt failed: C/C++ toolchain"  
-sudo apt-get install -y autoconf automake libtool pkg-config || die "apt failed: autotools"  
-sudo apt-get install -y python3 python3-venv python3-pip python3-dev || die "apt failed: python"  
-sudo apt-get install -y nodejs npm golang-go rustc cargo || die "apt failed: node/go/rust"  
+sudo apt-get install -y git rsync curl ca-certificates build-essential gcc g++ make cmake ninja-build || die "apt group A failed"  
+sudo apt-get install -y autoconf automake libtool pkg-config || die "apt group B failed"  
+sudo apt-get install -y python3 python3-venv python3-pip python3-dev || die "apt group C failed"  
+sudo apt-get install -y nodejs npm || die "apt group D (nodejs/npm) failed"  
+sudo apt-get install -y golang-go || die "apt group E (golang) failed"  
+sudo apt-get install -y rustc cargo || die "apt group F (rust) failed"  
 sudo apt-get install -y default-jdk-headless || warn "default-jdk-headless missing — Java builds unavailable"  
-sudo apt-get install -y libssl-dev libffi-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev || die "apt failed: -dev libs"  
-sudo apt-get install -y bubblewrap util-linux parted openssh-server || die "apt failed: sandbox deps"  
+sudo apt-get install -y libssl-dev libffi-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev || die "apt group G (-dev libs) failed"  
+sudo apt-get install -y bubblewrap util-linux parted openssh-server || die "apt group H (sandbox/ssh) failed"  
   
 # ==================================================================  
-# 2. NVMe — pick (always asks), ERASE-wipe, format as DizerCoreBuild  
+# 2. Pick the build disk -- ALWAYS asks, numbered list, boot excluded  
 # ==================================================================  
+mapfile -t disks < <(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}')  
+BOOT_SRC="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
+BOOT_DISK=""  
+case "$BOOT_SRC" in  
+  /dev/mmcblk*) BOOT_DISK="/dev/$(echo "$BOOT_SRC" | sed 's|/dev/||; s|p[0-9]*$||')";;  
+  /dev/sd*)     BOOT_DISK="$(echo "$BOOT_SRC" | sed 's|[0-9]*$||')";;  
+  /dev/nvme*)   BOOT_DISK="$(echo "$BOOT_SRC" | sed 's|p[0-9]*$||')";;  
+esac  
+[ -n "$BOOT_DISK" ] && ok "Boot disk: ${BOOT_DISK} (excluded)"  
+  
+declare -a cand=()  
+for d in "${disks[@]}"; do  
+  [ -n "$BOOT_DISK" ] && [ "$d" = "$BOOT_DISK" ] && continue  
+  case "$d" in /dev/mmcblk*|/dev/loop*|/dev/ram*) continue;; esac  
+  sz="$(lsblk -ndo SIZE "$d" 2>/dev/null || echo '?')"  
+  cand+=("$d"); ok "Detected non-boot disk: $d  $sz"  
+done  
+[ "${#cand[@]}" -gt 0 ] || die "No non-boot disk found."  
+  
+echo ""  
+echo "Available build disks (boot disk excluded):"  
+i=1  
+for d in "${cand[@]}"; do  
+  sz="$(lsblk -ndo SIZE "$d" 2>/dev/null || echo '?')"  
+  echo "  [$i] $d  $sz"  
+  i=$((i+1))  
+done  
 BLK_DISK=""  
-BLK_PART=""  
-pick_build_disk  
-ok "Using ${BLK_DISK} for the build volume"  
-wipe_build_disk  
-ok "Wipe complete; using ${BLK_PART}"  
+while :; do  
+  n=""  
+  read -r -p "Build disk number [1-${#cand[@]}]: " n </dev/tty || true  
+  [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#cand[@]}" ] && { BLK_DISK="${cand[$((n-1))]}"; break; }  
+  echo "Pick a number 1-${#cand[@]}."  
+done  
+ok "Using $BLK_DISK for the build volume"  
   
 # ==================================================================  
-# 3. Mount by UUID at BUILD_ROOT  
+# 3. Ask for repo URL + branch BEFORE the wipe (all questions first)  
+# ==================================================================  
+echo ""  
+read -r -p "Repo URL to seed into ${BUILD_ROOT}/repo.git (blank = skip): " SEED_REPO </dev/tty || true  
+SEED_BRANCH=""  
+if [ -n "$SEED_REPO" ]; then  
+  read -r -p "Branch to seed (blank = repo default branch): " SEED_BRANCH </dev/tty || true  
+fi  
+  
+# ==================================================================  
+# 4. Wipe confirm + format  
+# ==================================================================  
+echo ""  
+warn "ALL DATA on ${BLK_DISK} WILL BE ERASED"  
+lsblk "$BLK_DISK" || true  
+ANS=""  
+read -r -p "Type ERASE to wipe ${BLK_DISK}: " ANS </dev/tty || true  
+[ "$ANS" = "ERASE" ] || die "Aborted — disk untouched."  
+  
+mnt=""  
+while read -r mnt; do  
+  [ -n "$mnt" ] || continue  
+  warn "Unmounting ${mnt} (re-install)"  
+  sudo umount "$mnt" || die "Could not unmount ${mnt} — close anything using it and re-run."  
+done < <(lsblk -n -o MOUNTPOINT "$BLK_DISK" 2>/dev/null | grep -v '^$' || true)  
+sudo sed -i "\| ${BUILD_ROOT} |d" /etc/fstab  
+sudo systemctl daemon-reload 2>/dev/null || true  
+  
+sudo wipefs -a "$BLK_DISK"  
+sudo parted -s "$BLK_DISK" mklabel gpt  
+sudo parted -s "$BLK_DISK" mkpart primary ext4 1MiB 100%  
+sudo partprobe "$BLK_DISK" 2>/dev/null || true  
+sleep 2  
+case "$BLK_DISK" in  
+  *nvme*|*mmcblk*) BLK_PART="${BLK_DISK}p1";;  
+  *)               BLK_PART="${BLK_DISK}1";;  
+esac  
+[ -b "$BLK_PART" ] || die "Partition ${BLK_PART} not found after parted."  
+sudo mkfs.ext4 -F -L "$NVME_LABEL" "$BLK_PART"  
+ok "Wipe complete; using $BLK_PART"  
+  
+# ==================================================================  
+# 5. Mount at /mnt/build by UUID  
 # ==================================================================  
 ok "Mounting the build volume at ${BUILD_ROOT}"  
-NEW_UUID="$(sudo blkid -s UUID -o value "$BLK_PART")"  
-[ -n "$NEW_UUID" ] || die "Could not read UUID of ${BLK_PART}"  
-  
 sudo mkdir -p "$BUILD_ROOT"  
-sudo sed -i "\|${BUILD_ROOT}|d" /etc/fstab  
-echo "UUID=${NEW_UUID}  ${BUILD_ROOT}  ext4  defaults,nofail,x-systemd.device-timeout=10  0  2" | sudo tee -a /etc/fstab >/dev/null  
-sudo systemctl daemon-reload  
-sudo mount -a  
-findmnt "$BUILD_ROOT" >/dev/null || die "Build volume failed to mount at ${BUILD_ROOT}"  
+BLK_UUID="$(sudo blkid -s UUID -o value "$BLK_PART" || true)"  
+[ -n "$BLK_UUID" ] || die "blkid returned no UUID for $BLK_PART"  
+grep -q "$BLK_UUID" /etc/fstab || \  
+  echo "UUID=${BLK_UUID}  ${BUILD_ROOT}  ext4  defaults,nofail,x-systemd.device-timeout=5s  0  2" | sudo tee -a /etc/fstab >/dev/null  
+sudo mount "$BLK_PART" "$BUILD_ROOT"  
+grep -q "$BLK_UUID" /proc/mounts || die "${BUILD_ROOT} did not mount."  
   
 # ==================================================================  
-# 4. dizercorebuild service user + ~/.ssh (keyed from the Code-Agent)  
+# 6. dizercorebuild user + ssh dir (deleted on fresh wipe; reused else)  
 # ==================================================================  
-ok "Creating '${BUILD_USER}' service user"  
-if ! id "$BUILD_USER" &>/dev/null; then  
-  sudo useradd -m -s /bin/bash "$BUILD_USER"  
+if [ "$FRESH_WIPE" = "yes" ] && id "$BUILD_USER" >/dev/null 2>&1; then  
+  ok "Removing previous '${BUILD_USER}' user (fresh wipe)"  
+  sudo userdel -r "$BUILD_USER" 2>/dev/null || true  
 fi  
+if ! id "$BUILD_USER" >/dev/null 2>&1; then  
+  ok "Creating '${BUILD_USER}' service user"  
+  sudo useradd -m -s /bin/bash "$BUILD_USER"  
+else  
+  ok "Reusing existing '${BUILD_USER}' user"  
+fi  
+USER_HOME="$(getent passwd "$BUILD_USER" | cut -d: -f6)"  
 sudo mkdir -p "${USER_HOME}/.ssh"  
 sudo touch "${USER_HOME}/.ssh/authorized_keys"  
 sudo chmod 700 "${USER_HOME}/.ssh"  
@@ -207,7 +230,7 @@ sudo chown -R "${BUILD_USER}:${BUILD_USER}" "${USER_HOME}/.ssh"
 sudo systemctl enable --now ssh 2>/dev/null || true  
   
 # ==================================================================  
-# 5. Build workspace layout  
+# 7. Build workspace layout  
 # ==================================================================  
 ok "Creating build layout under ${BUILD_ROOT}"  
 sudo mkdir -p "${BUILD_ROOT}/jobs"  
@@ -219,39 +242,46 @@ sudo chown -R "${BUILD_USER}:${BUILD_USER}" "$BUILD_ROOT"
 sudo chmod 755 "$BUILD_ROOT"  
   
 # ==================================================================  
-# 6. Pull a repo into the bare repo (tree-mode seed)  
-#    Asks for the URL — blank skips. Whatever is entered here must be  
-#    listed verbatim in the Code-Agent's ALLOWED_REPOS env list, or  
-#    /run rejects tree-mode builds with HTTP 400.  
+# 8. Seed repo.git from the user-supplied URL (+ optional branch)  
 # ==================================================================  
-SEED_REPO=""  
-read -r -p "Repo URL to seed into ${BUILD_ROOT}/repo.git (blank = skip): " SEED_REPO </dev/tty || true  
-SEED_REPO="$(echo "$SEED_REPO" | tr -d '[:space:]')"  
 if [ -n "$SEED_REPO" ]; then  
-  ok "Cloning ${SEED_REPO} into ${BUILD_ROOT}/repo.git"  
-  sudo rm -rf "${BUILD_ROOT}/repo.git"  
-  sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network, or re-run and leave blank."  
-  ok "repo.git seeded at ${BUILD_ROOT}/repo.git"  
-  warn "Add this exact URL to ALLOWED_REPOS in the Code-Agent env file:"  
-  warn "  ${SEED_REPO}"  
+  if [ -n "$SEED_BRANCH" ]; then  
+    ok "Cloning ${SEED_REPO} (branch: ${SEED_BRANCH}) into ${BUILD_ROOT}/repo.git"  
+    sudo rm -rf "${BUILD_ROOT}/repo.git"  
+    sudo -u "$BUILD_USER" git clone --bare --branch "$SEED_BRANCH" --single-branch "$SEED_REPO" "${BUILD_ROOT}/repo.git" \  
+      || die "Clone failed — check the URL, the branch name, and network."  
+  else  
+    ok "Cloning ${SEED_REPO} (default branch) into ${BUILD_ROOT}/repo.git"  
+    sudo rm -rf "${BUILD_ROOT}/repo.git"  
+    sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" \  
+      || die "Clone failed — check the URL and network."  
+  fi  
+  sudo chown -R "${BUILD_USER}:${BUILD_USER}" "${BUILD_ROOT}/repo.git"  
+  ok "repo.git seeded — tree-mode builds clone it locally"  
+  warn "Add ${SEED_REPO} verbatim to ALLOWED_REPOS on the Code-Agent or /run 400s it."  
 else  
   warn "Skipped — ${BUILD_ROOT}/repo.git stays an empty bare repo."  
   warn "Tree-mode builds will clone the allowlisted URL directly."  
 fi  
   
 # ==================================================================  
-# 7. Done  
+# 9. Done  
 # ==================================================================  
 echo ""  
 banner "DizerCore-AI Build-Agent ready"  
 echo " This pi:      ${BUILD_USER}@${EXEC_IP}"  
 echo " Code-Agent:   ${CODE_IP}"  
 echo " Volume:       ${BLK_PART} mounted at ${BUILD_ROOT} (label ${NVME_LABEL})"  
+[ -n "$SEED_REPO" ] && echo " Seeded repo:  ${SEED_REPO}${SEED_BRANCH:+ (branch ${SEED_BRANCH})}"  
 echo " Toolchain:    gcc/g++, make, cmake, ninja, python3+venv, node+npm,"  
 echo "               go, cargo/rustc, java, bwrap+prlimit"  
 echo ""  
-echo " Next, on the Code-Agent (${CODE_IP}), run install.sh. When section 9"  
+echo " Next, on the Code-Agent (${CODE_IP}), run install.sh. When section 10"  
 echo " asks for the Build-Agent IP, enter:  ${EXEC_IP}"  
-echo " Then paste the pubkey install.sh prints into:"  
-echo "   ${USER_HOME}/.ssh/authorized_keys"  
+if [ "$FRESH_WIPE" = "yes" ]; then  
+  echo " Then paste the pubkey install.sh prints into:"  
+  echo "   ${USER_HOME}/.ssh/authorized_keys"  
+else  
+  echo " SSH key was preserved (reuse) — no re-paste needed."  
+fi  
 echo "============================================================"
