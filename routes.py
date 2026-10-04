@@ -169,8 +169,8 @@ async def index(request: Request):
         return RedirectResponse("/login", status_code=303)  
     return HTMLResponse(DASHBOARD_HTML)  
   
-  @router.post("/run")  
-async def run(  
+@router.post("/run")  
+async def run( 
     request: Request,  
     prompt: str = Form(...),  
     openai: str = Form("on"),  
