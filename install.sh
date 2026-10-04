@@ -7,7 +7,7 @@
 #   [1] DizerCore-AI.Code-Agent  — the main pipeline pi (this script's  
 #        full install: SSD wipe/mount, repo, venv, keys, service).  
 #   [2] DizerCore-AI.Build-Agent — the remote build executor pi.  
-#        Hands off to install-executor.sh and exits.  
+#        Downloads install-executor.sh to a real file and runs it.  
 #  
 # Code-Agent path:  
 #   Auto-detects plugged-in SSDs (excludes the SD card / boot disk),  
@@ -46,6 +46,10 @@ USER_NAME="$(whoami)"
   
 QUIRK="usb-storage.quirks=152d:0578:u"  
 CMDLINE="/boot/firmware/cmdline.txt"  
+  
+# SSH user on the Build-Agent — must match BUILD_USER in  
+# install-executor.sh exactly or every ssh/rsync call fails.  
+BUILD_SSH_USER="dizercorebuild"  
   
 # Executor installer fetched when role = Build-Agent.  
 EXECUTOR_URL="https://raw.githubusercontent.com/vekzla/DizerCore-AI/main/install-executor.sh"  
@@ -200,8 +204,13 @@ while true; do
       ;;  
     2)  
       ok "Role: DizerCore-AI.Build-Agent — fetching install-executor.sh"  
-      curl -fsSL "${EXECUTOR_URL}?nocache=$(date +%s)" | tr -d '\r' | bash  
-      exit $?  
+      EXEC_TMP="$(mktemp /tmp/install-executor.XXXXXX.sh)"  
+      curl -fsSL "${EXECUTOR_URL}?nocache=$(date +%s)" -o "$EXEC_TMP" || die "Could not fetch install-executor.sh"  
+      tr -d '\r' < "$EXEC_TMP" > "${EXEC_TMP}.clean"  
+      chmod +x "${EXEC_TMP}.clean"  
+      # exec replaces this script — the executor runs from a real file  
+      # so every read prompt works even under curl|bash invocation.  
+      exec bash "${EXEC_TMP}.clean"  
       ;;  
   esac  
   warn "Enter 1 or 2."  
@@ -416,9 +425,9 @@ fi
 # 10. DizerCore-AI.Build-Agent (optional) — remote build executor pi.  
 #     SSH keypair + reachability smoke test by IP. The Build-Agent pi  
 #     must already be set up (install-executor.sh — it prints its IP  
-#     at the end). Blank answer = disabled.  
+#     at the end). Type 0.0.0.0 to skip.  
 # ==================================================================  
-BUILD_KEY="${HOME}/.ssh/dizerbuild_ed25519"  
+BUILD_KEY="${HOME}/.ssh/dizercorebuild_ed25519"  
 BUILD_HOST=""  
 BUILD_ENABLED="false"  
   
@@ -444,27 +453,25 @@ else
   echo ""  
   banner "Add this public key on the Build-Agent (${BUILD_HOST})"  
   echo " On the Build-Agent pi, append the line below to:"  
-  echo "   /home/dizerbuild/.ssh/authorized_keys"  
-  echo " (install-executor.sh created the dizerbuild user and .ssh dir)"  
+  echo "   /home/${BUILD_SSH_USER}/.ssh/authorized_keys"  
+  echo " (install-executor.sh created the ${BUILD_SSH_USER} user and .ssh dir)"  
   echo ""  
   cat "${BUILD_KEY}.pub"  
   echo ""  
   read -r -p "Press ENTER once the key is installed on the Build-Agent... " _ </dev/tty || true  
   
   # Smoke test — BatchMode=yes so it fails fast instead of prompting.  
-  if ssh -i "$BUILD_KEY" -o BatchMode=yes -o ConnectTimeout=8 \  
-         -o StrictHostKeyChecking=accept-new \  
-         dizerbuild@"$BUILD_HOST" true 2>/dev/null; then  
+  if ssh -i "$BUILD_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "${BUILD_SSH_USER}@${BUILD_HOST}" true 2>/dev/null; then  
     ok "SSH smoke test passed — Build-Agent reachable"  
     BUILD_ENABLED="true"  
   else  
-    warn "SSH to dizerbuild@${BUILD_HOST} failed — leaving BUILD_ENABLED=false."  
+    warn "SSH to ${BUILD_SSH_USER}@${BUILD_HOST} failed — leaving BUILD_ENABLED=false."  
     warn "Check: Build-Agent powered on, install-executor.sh ran, key added to"  
-    warn "/home/dizerbuild/.ssh/authorized_keys. Re-run installer to retry."  
+    warn "/home/${BUILD_SSH_USER}/.ssh/authorized_keys. Re-run installer to retry."  
   fi  
   
   set_env "BUILD_HOST"     "$BUILD_HOST"  
-  set_env "BUILD_USER"     "dizerbuild"  
+  set_env "BUILD_USER"     "$BUILD_SSH_USER"  
   set_env "BUILD_KEY_PATH" "$BUILD_KEY"  
   set_env "BUILD_ROOT"     "/mnt/build"  
 fi  
