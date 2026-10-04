@@ -1,7 +1,7 @@
 #!/usr/bin/env bash  
 # DizerCore-AI  
 # ==================================================================  
-# install.sh — one-shot installer for Raspberry Pi 5 (headless).  
+# install.sh one-shot installer for Raspberry Pi 5 (headless).  
 # Auto-detects plugged-in SSDs (excludes the SD card / boot disk), lets  
 # the user pick the target, applies the UAS quirk hotfix automatically,  
 # then ALWAYS wipes the picked disk clean (new GPT label + single ext4  
