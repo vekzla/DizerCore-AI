@@ -1,26 +1,25 @@
 #!/usr/bin/env bash  
 # DizerCore-AI  
 # ==================================================================  
-# install-executor.sh — one-shot installer for the remote build  
-# executor pi used by DizerCore-AI running on edith.  
+# install-executor.sh — installer for the DizerCore-AI.Build-Agent pi  
+# (the remote build executor). Normally reached via install.sh's role  
+# picker, but also runnable directly:  
+#   curl -fsSL ".../install-executor.sh?nocache=$(date +%s)" | tr -d '\r' | bash  
 #  
-#   0. Asks for this machine's executor name (e.g. "buildpi") — used  
-#      for the ext4 volume label, optional hostname, and all output.  
-#   1. Detects the NVMe/SSD (excludes SD card / boot disk), lets the  
-#      user pick, then ALWAYS wipes it (typed ERASE confirmation) ->  
-#      new GPT + single ext4 partition labelled "<Name>Build".  
-#   2. Mounts it by UUID at /mnt/build via fstab (nofail +  
-#      x-systemd.device-timeout=10).  
-#   3. Creates the "dizerbuild" service user + ~/.ssh/authorized_keys  
-#      so the edith-generated key (~/.ssh/dizerbuild_ed25519.pub) can  
-#      be pasted in.  
-#   4. Installs build tooling + sandbox deps (bwrap, prlimit).  
-#   5. Creates /mnt/build/jobs/ (rsync targets) and  
-#      /mnt/build/repo.git (seeded bare repo for tree mode).  
+#   1. Asks for the Code-Agent's IP (the pi that will SSH in).  
+#   2. Detects NVMe/SSD (excludes SD card / boot disk), user picks,  
+#      typed ERASE -> GPT + ext4 labelled "DizerBuild".  
+#   3. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
+#   4. Creates "dizerbuild" user + ~/.ssh/authorized_keys.  
+#   5. Installs build tooling + sandbox deps (bwrap, prlimit) and  
+#      pulls the executor model via Ollama.  
+#   6. Creates /mnt/build/jobs/ + /mnt/build/repo.git (bare).  
+#   7. Prints THIS machine's IP — enter it into install.sh section 9  
+#      on the Code-Agent.  
 #  
-# Command contract (edith side, pipeline._remote_build):  
-#   rsync -az -e "ssh -i KEY" <pkgdir>/  dizerbuild@HOST:/mnt/build/jobs/<id>/  
-#   ssh  -i KEY dizerbuild@HOST prlimit --as=<MB>m --cpu=<S> \  
+# Command contract (Code-Agent side, pipeline._remote_build):  
+#   rsync -az -e "ssh -i KEY" <pkgdir>/  dizerbuild@IP:/mnt/build/jobs/<id>/  
+#   ssh  -i KEY dizerbuild@IP prlimit --as=<MB>m --cpu=<S> \  
 #        bwrap --unshare-all --bind /mnt/build/jobs/<id> /work \  
 #        --chdir /work --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"  
 # ==================================================================  
@@ -28,9 +27,14 @@ set -Eeuo pipefail
   
 BUILD_USER="dizerbuild"  
 BUILD_ROOT="/mnt/build"  
+NVME_LABEL="DizerBuild"  
 USER_HOME="/home/${BUILD_USER}"  
-EXEC_NAME=""  
-NVME_LABEL=""  
+  
+# Executor model pulled via Ollama — override with BUILD_MODEL env.  
+BUILD_MODEL="${BUILD_MODEL:-qwen2.5-coder:7b}"  
+  
+CODE_IP=""  
+EXEC_IP=""  
   
 banner() { echo "============================================================"; echo " $1"; echo "============================================================"; }  
 ok()   { echo "==> $1"; }  
@@ -45,10 +49,26 @@ confirm() {
   
 require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
   
+ask_ip() {  
+  # ask_ip <prompt> -> sets REPLY_IP to a validated IPv4 string  
+  local prompt="$1" guess="${2:-}" val=""  
+  while true; do  
+    if [ -n "$guess" ]; then  
+      read -r -p "${prompt} [${guess}]: " val </dev/tty || true  
+      val="${val:-$guess}"  
+    else  
+      read -r -p "${prompt}: " val </dev/tty || true  
+    fi  
+    val="$(echo "$val" | tr -d '[:space:]')"  
+    if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then  
+      REPLY_IP="$val"; return 0  
+    fi  
+    warn "Enter an IPv4 address like 192.168.1.50"  
+  done  
+}  
+  
 # ------------------------------------------------------------------  
-# pick_build_disk — scan block devices, exclude the boot disk and SD  
-# card, let the user choose. Sets BLK_DISK (whole disk, e.g.  
-# /dev/nvme0n1). The picked disk is ALWAYS wiped.  
+# pick_build_disk / wipe_build_disk — build NVMe, always wiped.  
 # ------------------------------------------------------------------  
 pick_build_disk() {  
   local root_src root_disk  
@@ -62,9 +82,9 @@ pick_build_disk() {
   local dev type fstype size mnt  
   while read -r dev type fstype size mnt; do  
     [ "$type" = "disk" ] || continue  
-    [ "$(basename "$dev")" = "$root_disk" ] && continue        # boot disk  
+    [ "$(basename "$dev")" = "$root_disk" ] && continue  
     case "$dev" in  
-      /dev/mmcblk*|/dev/loop*|/dev/zram*|/dev/ram*) continue ;; # SD card etc.  
+      /dev/mmcblk*|/dev/loop*|/dev/zram*|/dev/ram*) continue ;;  
     esac  
     CANDS+=("$dev|$size|${fstype:-none}")  
   done <<<"$(printf '%s\n' "${ROWS[@]}")"  
@@ -82,7 +102,7 @@ pick_build_disk() {
   
   local choice=""  
   while true; do  
-    read -r -p "Which disk is the ${EXEC_NAME} build NVMe? [1-${#CANDS[@]}] " choice </dev/tty || true  
+    read -r -p "Which disk is the Build-Agent NVMe? [1-${#CANDS[@]}] " choice </dev/tty || true  
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#CANDS[@]}" ]; then  
       IFS='|' read -r BLK_DISK _sz _fs <<<"${CANDS[$((choice - 1))]}"  
       return 0  
@@ -91,10 +111,6 @@ pick_build_disk() {
   done  
 }  
   
-# ------------------------------------------------------------------  
-# wipe_build_disk — ERASE the picked disk: new GPT, one ext4 partition  
-# labelled <ExecName>Build. Requires typing ERASE. Sets BLK_PART.  
-# ------------------------------------------------------------------  
 wipe_build_disk() {  
   echo ""  
   warn "INSTALL = FULL WIPE. EVERYTHING on ${BLK_DISK} will be destroyed:"  
@@ -114,7 +130,6 @@ wipe_build_disk() {
   sudo partprobe "$BLK_DISK" || true  
   sleep 2  
   
-  # nvme/mmcblk/loop disks append pN, others append N.  
   if [[ "$BLK_DISK" =~ (nvme|mmcblk|loop) ]]; then  
     BLK_PART="${BLK_DISK}p1"  
   else  
@@ -127,60 +142,49 @@ wipe_build_disk() {
 }  
   
 # ==================================================================  
-# 0. Banner + executor name + previous-install cleanup  
+# 0. Banner + IPs of both pis  
 # ==================================================================  
-banner "DizerCore build executor installer"  
+banner "DizerCore-AI Build-Agent installer"  
 require_tty  
   
 echo ""  
-echo "Name this build executor (used for the disk label and hostname)."  
-echo "Examples: buildpi, executor1, pi2"  
-while true; do  
-  read -r -p "Executor name: " EXEC_NAME </dev/tty || true  
-  EXEC_NAME="$(echo "$EXEC_NAME" | tr -d '[:space:]')"  
-  if [[ "$EXEC_NAME" =~ ^[a-zA-Z][a-zA-Z0-9-]{0,30}$ ]]; then  
-    break  
-  fi  
-  warn "Use 1-31 chars: letters, digits, hyphens; must start with a letter."  
-done  
-NVME_LABEL="${EXEC_NAME}Build"  
-ok "Executor name: ${EXEC_NAME} (volume label: ${NVME_LABEL})"  
-  
-# Offer to set the system hostname to match.  
-CUR_HOST="$(hostname 2>/dev/null || true)"  
-if [ "$CUR_HOST" != "$EXEC_NAME" ]; then  
-  if confirm "Set this machine's hostname to '${EXEC_NAME}' (currently '${CUR_HOST}')?"; then  
-    echo "$EXEC_NAME" | sudo tee /etc/hostname >/dev/null  
-    sudo hostnamectl set-hostname "$EXEC_NAME" 2>/dev/null || sudo hostname "$EXEC_NAME" || true  
-    ok "Hostname set to ${EXEC_NAME}"  
-  fi  
-fi  
+echo "This pi is the Build-Agent. The other pi runs the Code-Agent"  
+echo "(the DizerCore pipeline that SSHes in to run builds)."  
+ask_ip "Code-Agent IP address"; CODE_IP="$REPLY_IP"  
+EXEC_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"  
+ask_ip "This Build-Agent's IP" "$EXEC_GUESS"; EXEC_IP="$REPLY_IP"  
   
 PREV=0  
 id "$BUILD_USER" &>/dev/null && PREV=1  
 [ -d "$BUILD_ROOT/jobs" ] && PREV=1  
-  
 if [ "$PREV" -eq 1 ]; then  
   echo ""  
   warn "A previous executor install was detected (user '${BUILD_USER}' or ${BUILD_ROOT} exists)."  
   echo "This will wipe the picked disk (ERASE), reset ${USER_HOME}/.ssh,"  
   echo "and re-create ${BUILD_ROOT}. Re-run is safe but destructive."  
-  if ! confirm "Re-install the build executor?"; then  
+  if ! confirm "Re-install the Build-Agent?"; then  
     echo "Aborted."  
     exit 0  
   fi  
 fi  
   
 # ==================================================================  
-# 1. System deps — build toolchain + sandbox (bwrap, prlimit, rsync)  
+# 1. System deps + executor model  
 # ==================================================================  
 ok "Installing system dependencies"  
 sudo apt-get update -y  
 sudo apt-get install -y git rsync build-essential cmake python3 \  
-  bubblewrap util-linux parted  
+  bubblewrap util-linux parted curl openssh-server  
+  
+if ! command -v ollama >/dev/null 2>&1; then  
+  ok "Installing Ollama"  
+  curl -fsSL https://ollama.com/install.sh | sh  
+fi  
+ok "Pulling executor model ${BUILD_MODEL}"  
+ollama pull "$BUILD_MODEL"  
   
 # ==================================================================  
-# 2. NVMe — pick, ERASE-wipe, format as <ExecName>Build  
+# 2. NVMe — pick, ERASE-wipe, format as DizerBuild  
 # ==================================================================  
 BLK_DISK=""  
 BLK_PART=""  
@@ -204,7 +208,7 @@ sudo mount -a
 findmnt "$BUILD_ROOT" >/dev/null || die "Build volume failed to mount at ${BUILD_ROOT}"  
   
 # ==================================================================  
-# 4. dizerbuild service user + ~/.ssh  
+# 4. dizerbuild service user + ~/.ssh (keyed from the Code-Agent)  
 # ==================================================================  
 ok "Creating '${BUILD_USER}' service user"  
 if ! id "$BUILD_USER" &>/dev/null; then  
@@ -215,13 +219,14 @@ sudo touch "${USER_HOME}/.ssh/authorized_keys"
 sudo chmod 700 "${USER_HOME}/.ssh"  
 sudo chmod 600 "${USER_HOME}/.ssh/authorized_keys"  
 sudo chown -R "${BUILD_USER}:${BUILD_USER}" "${USER_HOME}/.ssh"  
+sudo systemctl enable --now ssh 2>/dev/null || true  
   
 # ==================================================================  
-# 5. Build workspace layout on the NVMe  
+# 5. Build workspace layout  
 # ==================================================================  
 ok "Creating build layout under ${BUILD_ROOT}"  
-sudo mkdir -p "${BUILD_ROOT}/jobs"          # rsync target, one dir per job  
-sudo mkdir -p "${BUILD_ROOT}/repo.git"      # seeded bare repo (tree mode)  
+sudo mkdir -p "${BUILD_ROOT}/jobs"  
+sudo mkdir -p "${BUILD_ROOT}/repo.git"  
 if [ ! -f "${BUILD_ROOT}/repo.git/HEAD" ]; then  
   sudo git init --bare "${BUILD_ROOT}/repo.git"  
 fi  
@@ -229,18 +234,17 @@ sudo chown -R "${BUILD_USER}:${BUILD_USER}" "$BUILD_ROOT"
 sudo chmod 755 "$BUILD_ROOT"  
   
 # ==================================================================  
-# 6. Done — hand back the authorized_keys path for install.sh section 9  
+# 6. Done  
 # ==================================================================  
 echo ""  
-banner "Build executor '${EXEC_NAME}' ready"  
-echo " Host role:  ${EXEC_NAME} (${BUILD_USER}@${EXEC_NAME})"  
-echo " Volume:     ${BLK_PART} mounted at ${BUILD_ROOT} (label ${NVME_LABEL})"  
+banner "DizerCore-AI Build-Agent ready"  
+echo " This pi:      ${BUILD_USER}@${EXEC_IP}"  
+echo " Code-Agent:   ${CODE_IP}"  
+echo " Volume:       ${BLK_PART} mounted at ${BUILD_ROOT} (label ${NVME_LABEL})"  
+echo " Model:        ${BUILD_MODEL}"  
 echo ""  
-echo " On edith, when install.sh section 9 shows the public key, append it to:"  
+echo " Next, on the Code-Agent (${CODE_IP}), run install.sh. When section 9"  
+echo " asks for the Build-Agent IP, enter:  ${EXEC_IP}"  
+echo " Then paste the pubkey install.sh prints into:"  
 echo "   ${USER_HOME}/.ssh/authorized_keys"  
-echo " (e.g.  sudo tee -a ${USER_HOME}/.ssh/authorized_keys <<< '<pubkey>')"  
-echo ""  
-echo " Edith will run:"  
-echo "   rsync -> ${BUILD_ROOT}/jobs/<job_id>/"  
-echo "   ssh ${BUILD_USER}@${EXEC_NAME} prlimit + bwrap <build_cmd>"  
 echo "============================================================"
