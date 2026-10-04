@@ -51,6 +51,7 @@ MAX_OUTPUT_TOKENS = int(os.environ.get("DIZER_MAX_OUTPUT_TOKENS", str(MAX_TOKENS
 GROQ_MAX_OUTPUT_TOKENS = int(os.environ.get("DIZER_GROQ_MAX_OUTPUT_TOKENS", "8192"))  
 MAX_SAFETYWALL_TRIES = int(os.environ.get("DIZER_MAX_SAFETYWALL_TRIES", "8"))  
 MAX_CONCURRENT_JOBS = int(os.environ.get("DIZER_MAX_CONCURRENT_JOBS", "2"))  
+MAX_LEVEL = 3
   
 # Seconds between outbound calls — keeps free-tier keys under their RPM/RPD.  
 RATE_LIMIT_DELAY = float(os.environ.get("DIZER_RATE_LIMIT_DELAY", "1.0"))  
@@ -163,8 +164,6 @@ BUILD_CPU_S = int(os.environ.get("BUILD_CPU_S", "3600"))
 # Tree-mode gate — comma-separated clone-URL allowlist. /run rejects any  
 # build_repo not listed here (HTTP 400).  
 ALLOWED_REPOS = _slugs("ALLOWED_REPOS", "")  
-  
-  
 def _is_unusable(text: str) -> bool:  
     """Safetywall: detect deflection/refusal output instead of code."""  
     if not text or not text.strip():  
@@ -190,17 +189,15 @@ def classify_upload(name: str, mime: str) -> str:
     if ext == "docx" or "wordprocessingml" in mime:  
         return "docx"  
     return "text"  
-  
-  
-def tier_for(complexity: int) -> str:  
-    """1-2 -> light, 3 -> normal, 4-5 -> heavy."""  
-    if complexity <= 2:  
+
+def tier_for(level: int) -> str:  
+    """1 simple -> light, 2 normal, 3 difficult -> heavy."""  
+    if level <= 1:  
         return "light"  
-    if complexity >= 4:  
+    if level >= 3:  
         return "heavy"  
-    return "normal"  
-  
-  
+    return "normal"
+      
 # ---------------------------------------------------------------------------  
 # Config — API keys loaded once at startup into runtime.cfg  
 # ---------------------------------------------------------------------------  
