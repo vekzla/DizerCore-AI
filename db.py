@@ -147,7 +147,7 @@ class Job:
     id: str  
     owner: str  
     prompt: str  
-    complexity: int = 3          # 1-2 light, 3 normal, 4-5 heavy (user-set)  
+    complexity: int = 1          # 1 simple, 2 normal, 3 difficult — auto-escalated on build errors
     state: str = State.QUEUED  
     error: str = ""  
     steps: dict = field(default_factory=_default_steps)  
@@ -200,7 +200,7 @@ def load_jobs() -> dict:
                 d["state"] = State.FAILED  
                 d["error"] = "Server restarted while job was running."  
             # Backfill new fields for jobs saved by an older version.  
-            d.setdefault("complexity", 3)  
+            d.setdefault("complexity", 1)
             d.setdefault("attachments", [])  
             merged_steps = _default_steps()  
             merged_steps.update(d.get("steps", {}))  
