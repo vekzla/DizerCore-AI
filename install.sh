@@ -5,9 +5,9 @@
 # Auto-detects plugged-in SSDs (excludes the SD card / boot disk), lets  
 # the user pick the target, applies the UAS quirk hotfix automatically,  
 # then ALWAYS wipes the picked disk clean (new GPT label + single ext4  
-# partition) after a typed ERASE confirmation. Mounts by UUID at  
-# /mnt/dizerdata, writes the env file (incl. optional dedicated  
-# OpenRouter JUDGE key), installs the systemd service.  
+# # partition) after a typed ERASE confirmation. Mounts by UUID at  
+# /mnt/dizerdata, writes the env file (OpenAI coder key + Groq + Gemini +  
+# required OpenRouter JUDGE key), installs the systemd service.
 #  
 # KEY BACKUP: the env file (API keys + admin password) is backed up to  
 # ~/dizercore.env.bak on the SD card, so reinstalls can restore keys  
