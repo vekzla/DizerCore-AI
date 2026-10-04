@@ -199,7 +199,7 @@ BLK_UUID="$(sudo blkid -s UUID -o value "$BLK_PART" || true)"
 [ -n "$BLK_UUID" ] || die "blkid returned no UUID for $BLK_PART"  
 grep -q "$BLK_UUID" /etc/fstab || echo "UUID=${BLK_UUID}  ${BUILD_ROOT}  ext4  defaults,nofail,x-systemd.device-timeout=5s  0  2" | sudo tee -a /etc/fstab >/dev/null  
 sudo mount "$BLK_PART" "$BUILD_ROOT"  
-grep -q "$BLK_UUID" /proc/mounts || die "${BUILD_ROOT} did not mount."  
+findmnt -rn "$BUILD_ROOT" >/dev/null || die "${BUILD_ROOT} did not mount."  
   
 # ==================================================================  
 # 6. dizercorebuild user + ssh dir (deleted on fresh wipe; reused else)  
