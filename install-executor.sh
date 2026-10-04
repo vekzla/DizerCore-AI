@@ -22,9 +22,12 @@
 #  
 # Command contract (Code-Agent side, pipeline._remote_build):  
 #   rsync -az -e "ssh -i KEY" <pkgdir>/  dizercorebuild@IP:/mnt/build/jobs/<id>/  
-#   ssh  -i KEY dizercorebuild@IP prlimit --as=<MB>m --cpu=<S> \  
-#        bwrap --unshare-all --bind /mnt/build/jobs/<id> /work \  
-#        --chdir /work --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"  
+#   ssh  -i KEY dizercorebuild@IP sh -c \  
+#        'prlimit --as=<MB>m --cpu=<S> \  
+#         bwrap --unshare-all --bind /mnt/build/jobs/<id> /work \  
+#         --chdir /work --dev /dev --proc /proc -- /bin/sh -lc "<cmd>"'  
+#   (the ssh args are one command — written wrapped here for docs only;  
+#    pipeline.py passes them as a single argv array, no shell join)  
 # ==================================================================  
 set -Eeuo pipefail  
   
