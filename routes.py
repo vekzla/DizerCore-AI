@@ -191,17 +191,18 @@ async def run(
   
     build_repo = _check_build_repo(build_repo) if build == "on" else ""  
   
-    job = Job(  
+job = Job(  
         id=uuid.uuid4().hex[:12],  
         owner=user,  
         prompt=prompt,  
-        complexity=max(1, min(5, complexity)),  
+        complexity=1,  
         stages={"openai": openai == "on",  
                 "groq": groq == "on",  
                 "gemini": gemini == "on",  
                 "inkling": inkling == "on",  
                 "build": build == "on"},  
-    )  
+    )
+
     if build_repo:  
         job.stages["build_repo"] = build_repo  
     if build_cmd.strip():  
