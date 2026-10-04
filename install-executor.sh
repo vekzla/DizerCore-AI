@@ -7,9 +7,9 @@
 #  
 #   1. Detects a previous install and offers: wipe clean / reuse.  
 #   2. Asks for the Code-Agent's IP (the pi that will SSH in).  
-#   3. Lists ALL non-boot disks (zram/loop/ram excluded), user picks  
-#      by number, typed ERASE -> GPT + ext4 labelled "DizerCoreBuild".  
-#      Re-run safe: unmounts existing mounts of the disk first.  
+#   3. Lists ALL non-boot disks, user picks by number, typed ERASE ->  
+#      GPT + ext4 labelled "DizerCoreBuild". Re-run safe: unmounts  
+#      existing mounts of the disk first.  
 #   4. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
 #   5. Creates "dizercorebuild" user + ~/.ssh/authorized_keys  
 #      (preserved on "reuse" so the Code-Agent key survives).  
@@ -55,12 +55,6 @@ ask_ip() {
   done  
 }  
   
-confirm() {  
-  local a=""  
-  read -r -p "$* [y/N]: " a </dev/tty || true  
-  [[ "$a" =~ ^[Yy]$ ]]  
-}  
-  
 # ==================================================================  
 # 0. Previous install?  Offer wipe-clean or reuse (like install.sh)  
 # ==================================================================  
@@ -72,7 +66,7 @@ fi
 FRESH_WIPE="yes"  
 if [ "$PREV_INSTALL" = "yes" ]; then  
   banner "Previous Build-Agent install detected"  
-  echo " Found: $([ "$(id "$BUILD_USER" 2>/dev/null)" ] && echo "user '${BUILD_USER}' " )$(findmnt -rn "$BUILD_ROOT" >/dev/null 2>&1 && echo "mounted ${BUILD_ROOT}")"  
+  echo " Found: $(id "$BUILD_USER" >/dev/null 2>&1 && echo "user '${BUILD_USER}' ")$(findmnt -rn "$BUILD_ROOT" >/dev/null 2>&1 && echo "mounted ${BUILD_ROOT}")"  
   echo ""  
   echo "  [1] WIPE previous install  (fresh disk format, fresh keys)"  
   echo "  [2] REUSE                  (keep user + SSH key; reformat disk)"  
@@ -117,7 +111,6 @@ sudo apt-get install -y bubblewrap util-linux parted openssh-server || die "apt 
   
 # ==================================================================  
 # 2. Pick the build disk -- ALWAYS asks, numbered list, boot excluded  
-#    zram/loop/ram are virtual disks, never real storage -> excluded  
 # ==================================================================  
 mapfile -t disks < <(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}')  
 BOOT_SRC="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
@@ -245,12 +238,13 @@ sudo chmod 755 "$BUILD_ROOT"
 # 8. Seed repo.git from the user-supplied URL (+ optional branch)  
 # ==================================================================  
 if [ -n "$SEED_REPO" ]; then  
-  sudo rm -rf "${BUILD_ROOT}/repo.git"  
   if [ -n "$SEED_BRANCH" ]; then  
     ok "Cloning ${SEED_REPO} (branch: ${SEED_BRANCH}) into ${BUILD_ROOT}/repo.git"  
+    sudo rm -rf "${BUILD_ROOT}/repo.git"  
     sudo -u "$BUILD_USER" git clone --bare --branch "$SEED_BRANCH" --single-branch "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL, the branch name, and network."  
   else  
     ok "Cloning ${SEED_REPO} (default branch) into ${BUILD_ROOT}/repo.git"  
+    sudo rm -rf "${BUILD_ROOT}/repo.git"  
     sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network."  
   fi  
   sudo chown -R "${BUILD_USER}:${BUILD_USER}" "${BUILD_ROOT}/repo.git"  
