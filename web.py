@@ -7,6 +7,7 @@
 # Live updates: /status/stream/{job_id} SSE delivers token-smooth deltas for  
 # each step key (generate/verify/final + *_thinking). poll() remains as the  
 # snapshot hydrator and fallback for finished jobs.  
+# Build panel renders job.steps["build_status"] / ["build_ready"|"build_output"].  
   
 DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>  
 <link rel="icon" href="/static/dizercore.png">  
@@ -49,6 +50,9 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
   .row label { font-size:13px; color:#cbd5e1; }  
   select,input[type=number] { background:#1e293b; color:#f8fafc;  
                               border:1px solid #334155; border-radius:6px; padding:4px 6px; }  
+  input[type=text].wide { background:#1e293b; color:#f8fafc;  
+                              border:1px solid #334155; border-radius:6px; padding:4px 6px;  
+                              min-width:260px; }  
   button { background:#2563eb; border:none; color:#fff; padding:8px 16px;  
            border-radius:8px; cursor:pointer; font-size:14px; }  
   button:hover { background:#1d4ed8; }  
@@ -90,17 +94,24 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
       <label>Complexity  
         <select name="complexity"><option>1</option><option>2</option>  
           <option selected>3</option><option>4</option><option>5</option></select></label>  
-      <label><input type="checkbox" name="openrouter" checked> OpenRouter</label>  
+      <label><input type="checkbox" name="openai" checked> ChatGPT</label>  
       <label><input type="checkbox" name="groq" checked> Groq</label>  
       <label><input type="checkbox" name="gemini" checked> Gemini</label>  
       <label><input type="checkbox" name="inkling" checked> Judge</label>  
+      <label><input type="checkbox" name="build"> Build &amp; test (sandboxed on tadashi)</label>  
       <input type="file" id="files" name="files" multiple>  
       <button type="submit">Run</button>  
       <button type="button" class="ghost" onclick="clearAll()">Clear</button>  
       <button type="button" class="stop" onclick="stopJob()">Stop</button>  
     </div>  
+    <div class="row" id="buildopts" style="display:none">  
+      <label>Repo URL  
+        <input type="text" class="wide" name="build_repo" placeholder="https://github.com/... (allowlisted)"></label>  
+      <label>Build command (optional)  
+        <input type="text" class="wide" name="build_cmd" placeholder="e.g. cmake --build build -j4"></label>  
+    </div>  
   </form>  
-  <div class="stage" id="w-generate"><h4>OpenRouter  
+  <div class="stage" id="w-generate"><h4>ChatGPT (OpenAI)  
     <button type="button" class="copy" onclick="copyStage('generate',this)">Copy</button></h4>  
     <div class="meta" id="generate_meta"></div>  
     <div class="thinking" id="generate_thinking" style="display:none"></div>  
@@ -119,6 +130,10 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
     <button type="button" class="copy" onclick="copyStage('summary',this)">Copy</button></h4>  
     <div class="meta" id="summary_meta"></div>  
     <pre id="summary"></pre></div>  
+  <div class="stage" id="w-build"><h4>Build package  
+    <button type="button" class="copy" onclick="copyStage('build_ready',this)">Copy</button></h4>  
+    <div class="meta" id="build_meta"></div>  
+    <pre id="build_ready"></pre></div>  
 </div>  
 <script>  
 // Surface any JS error as an alert — a silent exception is why buttons  
@@ -128,7 +143,7 @@ window.onerror=function(m,s,l,c){ alert('JS error: '+m+' @line '+l); };
 let jobId=null, lastUpdated=0, es=null, pollTimer=null;  
 const KEYS=['generate','verify','final','summary'];  
 const TERMINAL=['done','failed','cancelled'];  
-const AGENT_CHECK={'generate':'openrouter','verify':'groq','final':'gemini'};  
+const AGENT_CHECK={'generate':'openai','verify':'groq','final':'gemini'};  
   
 function clearStages(){  
   for(const k of KEYS){  
@@ -137,6 +152,8 @@ function clearStages(){
     const th=document.getElementById(k+'_thinking');  
     if(th){ th.textContent=''; th.style.display='none'; }  
   }  
+  document.getElementById('build_ready').textContent='';  
+  document.getElementById('build_meta').textContent='';  
 }  
 function clearAll(){  
   document.getElementById('prompt').value='';  
@@ -148,6 +165,7 @@ function clearAll(){
 function closeStream(){ if(es){ es.close(); es=null; } }  
 function clearSpinners(){  
   for(const k of KEYS){ const el=document.getElementById(k+'_meta'); if(el) el.innerHTML=''; }  
+  const bm=document.getElementById('build_meta'); if(bm) bm.innerHTML='';  
 }  
 function copyStage(key,btn){  
   const t=document.getElementById(key).textContent;  
@@ -166,6 +184,10 @@ dz.addEventListener('drop',e=>{
   for(const f of e.dataTransfer.files) dt.items.add(f);  
   fi.files=dt.files;  
   dz.textContent=fi.files.length+' file(s) attached';  
+});  
+// ---- build checkbox toggles the repo/cmd row ----  
+document.querySelector('input[name=build]').addEventListener('change',function(){  
+  document.getElementById('buildopts').style.display=this.checked?'flex':'none';  
 });  
 function renderJob(j){  
   const term=TERMINAL.includes((j.state||'').toLowerCase());  
@@ -186,6 +208,13 @@ function renderJob(j){
   }  
   const conf=j.steps['summary_conf'];  
   if(conf) document.getElementById('summary_meta').textContent='score '+conf;  
+  // Build panel — build_status goes in meta, build_ready/build_output in the pre.  
+  const bs=j.steps['build_status'];  
+  const bm=document.getElementById('build_meta');  
+  if(bm) bm.textContent=bs?('status — '+bs):'';  
+  const bo=document.getElementById('build_ready');  
+  if(bo && (j.steps['build_ready']||j.steps['build_output']))  
+    bo.textContent=j.steps['build_ready']||j.steps['build_output'];  
 }  
 function seedWorking(){  
   const form=document.getElementById('runform');  
@@ -195,6 +224,12 @@ function seedWorking(){
     const metaEl=document.getElementById(k+'_meta');  
     if(on) metaEl.innerHTML='<span class="spin"></span>working';  
     else metaEl.textContent='skipped';  
+  }  
+  const bm=document.getElementById('build_meta');  
+  if(bm){  
+    if(form.elements['build'].checked)  
+      bm.innerHTML='<span class="spin"></span>working';  
+    else bm.textContent='';  
   }  
 }  
 async function runJob(e){  
@@ -306,7 +341,7 @@ async function loadJobs(){
     del.onclick=(ev)=>deleteJob(j.id, ev);  
     const b=document.createElement('span'); b.innerHTML=badge(j.state);  
     row.appendChild(b); row.appendChild(label); row.appendChild(del);  
-    row.onclick=()=>selectJob(j.id);  
+    row.onclick=()=>selectJob(id);  
     div.appendChild(row);  
   }  
 }  
