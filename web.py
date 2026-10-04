@@ -8,6 +8,7 @@
 # each step key (generate/verify/final + *_thinking). poll() remains as the  
 # snapshot hydrator and fallback for finished jobs.  
 # Build panel renders job.steps["build_status"] / ["build_ready"|"build_output"].  
+# Complexity is auto-escalated (1-3); the level badge lives in summary_meta.  
   
 DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>  
 <link rel="icon" href="/static/dizercore.png">  
@@ -91,9 +92,6 @@ DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>DizerCoreAI</title>
     <textarea id="prompt" name="prompt" placeholder="Describe what to build..." required></textarea>  
     <div id="dropzone">Drag &amp; drop files here, or use the picker below</div>  
     <div class="row">  
-      <label>Complexity  
-        <select name="complexity"><option>1</option><option>2</option>  
-          <option selected>3</option><option>4</option><option>5</option></select></label>  
       <label><input type="checkbox" name="openai" checked> ChatGPT</label>  
       <label><input type="checkbox" name="groq" checked> Groq</label>  
       <label><input type="checkbox" name="gemini" checked> Gemini</label>  
@@ -144,6 +142,7 @@ let jobId=null, lastUpdated=0, es=null, pollTimer=null;
 const KEYS=['generate','verify','final','summary'];  
 const TERMINAL=['done','failed','cancelled'];  
 const AGENT_CHECK={'generate':'openai','verify':'groq','final':'gemini'};  
+const LEVEL_NAMES={1:'simple',2:'normal',3:'difficult'};  
   
 function clearStages(){  
   for(const k of KEYS){  
@@ -207,11 +206,15 @@ function renderJob(j){
     }  
   }  
   const conf=j.steps['summary_conf'];  
-  if(conf) document.getElementById('summary_meta').textContent='score '+conf;  
+  const lvl=j.complexity||1;  
+  const lvlTxt='level '+lvl+' ('+(LEVEL_NAMES[lvl]||lvl)+')';  
+  document.getElementById('summary_meta').textContent=  
+    (conf?'score '+conf+' — ':'')+lvlTxt;  
   // Build panel — build_status goes in meta, build_ready/build_output in the pre.  
   const bs=j.steps['build_status'];  
   const bm=document.getElementById('build_meta');  
-  if(bm) bm.textContent=bs?('status — '+bs):'';  
+  const bl=j.steps['build_level'];  
+  if(bm) bm.textContent=(bs?('status — '+bs):'')+(bl?((bs?' — ':'')+bl):'');  
   const bo=document.getElementById('build_ready');  
   if(bo && (j.steps['build_ready']||j.steps['build_output']))  
     bo.textContent=j.steps['build_ready']||j.steps['build_output'];  
