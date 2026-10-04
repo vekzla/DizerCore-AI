@@ -227,17 +227,19 @@ sudo chown -R "${BUILD_USER}:${BUILD_USER}" "$BUILD_ROOT"
 sudo chmod 755 "$BUILD_ROOT"  
   
 # ==================================================================  
-# 6. Pull the app repo into the bare repo (tree-mode seed)  
+# 6. Pull a repo into the bare repo (tree-mode seed)  
 # ==================================================================  
-if confirm "Pull ${REPO_URL} into ${BUILD_ROOT}/repo.git now?"; then  
-  ok "Cloning ${REPO_URL} into ${BUILD_ROOT}/repo.git"  
+if confirm "Pull a git repo into ${BUILD_ROOT}/repo.git now?"; then  
+  read -r -p "Repo URL [${REPO_URL}]: " _repo_in </dev/tty || true  
+  SEED_REPO="${_repo_in:-$REPO_URL}"  
+  ok "Cloning ${SEED_REPO} into ${BUILD_ROOT}/repo.git"  
   sudo rm -rf "${BUILD_ROOT}/repo.git"  
-  sudo -u "$BUILD_USER" git clone --bare "$REPO_URL" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network, or skip and pull later."  
+  sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network, or skip and pull later."  
   ok "repo.git seeded at ${BUILD_ROOT}/repo.git"  
 else  
   warn "Skipped — ${BUILD_ROOT}/repo.git stays an empty bare repo."  
   warn "Tree-mode builds will clone the allowlisted URL directly."  
-fi  
+fi
   
 # ==================================================================  
 # 7. Done  
