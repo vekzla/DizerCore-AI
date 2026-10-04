@@ -18,8 +18,18 @@
 # stages always have something to work with. The build payload is produced  
 # ONLY through guardrails.build_package — fenced code blocks, no prose,  
 # no judge comments (summary is never a build input).  
+#  
+# REMOTE BUILD: when BUILD_ENABLED + BUILD_HOST are set, the extracted  
+# package is rsynced to the tadashi executor and built under prlimit + bwrap.  
+# A failed remote build counts as a failed build attempt and drives the same  
+# 1->2->3 escalation loop as a failed extraction (capped by  
+# min(BUILD_MAX_RETRIES, MAX_LEVEL - 1)).  
 import asyncio  
+import os  
+import shlex  
+import tempfile  
   
+import config  
 import runtime  
 import guardrails  
 from config import JUDGE_MODELS, MAX_LEVEL, logger, tier_for  
@@ -122,16 +132,145 @@ def _skip_build(job):
         "(all responses were prose or empty).")  
   
   
+# ----------------------------------------------------------------------------  
+# Remote build executor (tadashi) — see install-executor.sh for the host-side  
+# contract. Edith side only ever calls ssh/rsync as argument arrays; the one  
+# shell string on the remote side runs inside prlimit + bwrap.  
+# ----------------------------------------------------------------------------  
+  
+def _ssh_base() -> list[str]:  
+    """ssh argv prefix used for every tadashi call."""  
+    return ["ssh", "-i", config.BUILD_KEY_PATH, "-o", "BatchMode=yes",  
+            "-o", "ConnectTimeout=10", "-o",  
+            "StrictHostKeyChecking=accept-new",  
+            f"{config.BUILD_USER}@{config.BUILD_HOST}"]  
+  
+  
+def _rsync_ssh() -> str:  
+    """rsync -e shell string (rsync needs a string, not argv)."""  
+    return ("ssh -i " + shlex.quote(config.BUILD_KEY_PATH)  
+            + " -o BatchMode=yes -o StrictHostKeyChecking=accept-new")  
+  
+  
+def _remote_enabled(job) -> bool:  
+    return (bool(job.stages.get("build"))  
+            and config.BUILD_ENABLED and bool(config.BUILD_HOST))  
+  
+  
+def _default_build_cmd() -> str:  
+    """Fallback remote build command when the user gave no build_cmd."""  
+    return ("if [ -f Makefile ]; then make -j" + str(config.BUILD_JOBS) +  
+            "; elif ls *.py >/dev/null 2>&1; then python3 -m py_compile *.py"  
+            "; elif ls *.c >/dev/null 2>&1; then cc -O2 -o app *.c"  
+            "; else echo 'no known build target'; exit 2; fi")  
+  
+  
+def _remote_cmd(job, jobdir: str, tree: bool) -> str:  
+    """Single remote shell string: prep the job dir (clone in tree mode),  
+    then run the build under prlimit + bwrap with cwd inside the sandbox."""  
+    cmd = (job.stages.get("build_cmd") or "").strip() or _default_build_cmd()  
+    if tree:  
+        repo = job.stages["build_repo"].strip()  
+        prep = (f"mkdir -p {shlex.quote(jobdir)} && cd {shlex.quote(jobdir)}"  
+                f" && git clone {shlex.quote(repo)} src 2>/dev/null"  
+                f" || git clone {shlex.quote(config.BUILD_ROOT + '/repo.git')}"  
+                " src; cd src && "  
+                "[ -f ../changes.diff ] && git apply ../changes.diff; "  
+                "true")  
+        workdir = f"{jobdir}/src"  
+    else:  
+        prep = f"mkdir -p {shlex.quote(jobdir)}"  
+        workdir = jobdir  
+    sandbox = (f"prlimit --as={config.BUILD_MEM_MB}m "  
+               f"--cpu={config.BUILD_CPU_S} "  
+               "bwrap --unshare-all --dev /dev --proc /proc "  
+               f"--bind {shlex.quote(workdir)} /work --chdir /work "  
+               f"--setenv MAKEFLAGS -j{config.BUILD_JOBS} "  
+               f"-- /bin/sh -lc {shlex.quote(cmd)}")  
+    return prep + " && " + sandbox  
+  
+  
+async def _ship_files(job, pkg: dict, jobdir: str) -> tuple[bool, str]:  
+    """rsync the extracted package files into the tadashi job dir."""  
+    try:  
+        with tempfile.TemporaryDirectory() as td:  
+            for rel, body in pkg["files"].items():  
+                dest = os.path.join(td, rel)  
+                os.makedirs(os.path.dirname(dest) or td, exist_ok=True)  
+                with open(dest, "w") as fh:  
+                    fh.write(body)  
+            proc = await asyncio.create_subprocess_exec(  
+                "rsync", "-az", "--delete", "-e", _rsync_ssh(), td + "/",  
+                f"{config.BUILD_USER}@{config.BUILD_HOST}:{jobdir}/",  
+                stdout=asyncio.subprocess.PIPE,  
+                stderr=asyncio.subprocess.STDOUT)  
+            out, _ = await asyncio.wait_for(proc.communicate(), 120)  
+            if proc.returncode != 0:  
+                return False, "rsync failed:\n" + (out or b"").decode(  
+                    errors="replace")[-2000:]  
+            return True, ""  
+    except asyncio.TimeoutError:  
+        proc.kill()  
+        return False, "rsync timed out after 120s"  
+    except Exception as e:  # noqa: BLE001  
+        return False, f"rsync dispatch error: {e}"  
+  
+  
+async def _remote_build(job, pkg: dict) -> tuple[bool, str]:  
+    """Ship the package to tadashi and run the build under prlimit + bwrap.  
+    Returns (ok, log_tail). Never raises."""  
+    jobdir = f"{config.BUILD_ROOT}/jobs/{job.id}"  
+    tree = bool((job.stages.get("build_repo") or "").strip())  
+    timeout = config.BUILD_TIMEOUT_TREE if tree else config.BUILD_TIMEOUT_S  
+  
+    if not tree:  
+        ok, log = await _ship_files(job, pkg, jobdir)  
+        if not ok:  
+            return False, log  
+    elif pkg["files"].get("changes.diff"):  
+        # Tree mode: push just the diff so the remote can `git apply` it.  
+        proc = await asyncio.create_subprocess_exec(  
+            *_ssh_base(),  
+            f"mkdir -p {shlex.quote(jobdir)} && cat > "  
+            f"{shlex.quote(jobdir)}/changes.diff",  
+            stdin=asyncio.subprocess.PIPE,  
+            stdout=asyncio.subprocess.PIPE,  
+            stderr=asyncio.subprocess.STDOUT)  
+        out, _ = await asyncio.wait_for(  
+            proc.communicate(pkg["files"]["changes.diff"].encode()), 60)  
+        if proc.returncode != 0:  
+            return False, "diff upload failed:\n" + (out or b"").decode(  
+                errors="replace")[-2000:]  
+  
+    try:  
+        proc = await asyncio.create_subprocess_exec(  
+            *_ssh_base(), _remote_cmd(job, jobdir, tree),  
+            stdout=asyncio.subprocess.PIPE,  
+            stderr=asyncio.subprocess.STDOUT)  
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)  
+        return proc.returncode == 0, (out or b"").decode(  
+            errors="replace")[-4000:]  
+    except asyncio.TimeoutError:  
+        proc.kill()  
+        return False, f"remote build timed out after {timeout}s"  
+    except Exception as e:  # noqa: BLE001  
+        return False, f"remote dispatch error: {e}"  
+  
+  
 async def _prepare_build(job):  
     """Guardrail gate + auto-escalating repair loop: turn the winning RAW  
-    output into a clean code package. On each failed build attempt the job  
-    level is bumped 1->2->3 (light->normal->heavy, capped at MAX_LEVEL) and  
+    output into a clean code package and, when BUILD_ENABLED + BUILD_HOST  
+    are set, prove it compiles/runs on tadashi. On each failed attempt  
+    (extraction OR remote build) the job level is bumped 1->2->3  
+    (light->normal->heavy, capped at MAX_LEVEL and BUILD_MAX_RETRIES) and  
     the winning agent regenerates its output at the new tier. Writes  
-    job.steps['build_ready'] + 'build_status' (+ 'build_level' on  
-    escalation). Never raises; never lets prose/comments leave the box as  
-    'code'."""  
+    job.steps['build_ready'], 'build_status', 'build_output' (+  
+    'build_level' on escalation). Never raises; never lets prose/comments  
+    leave the box as 'code'."""  
     winner_key = job.steps.get("_winner_key")  
     raw = job.steps.get(winner_key) if winner_key else ""  
+    remote = _remote_enabled(job)  
+    max_attempts = min(config.BUILD_MAX_RETRIES, MAX_LEVEL - 1) + 1  
   
     if not job.stages.get("build"):  
         # No build stage enabled — single extraction pass, level stays 1.  
@@ -150,15 +289,30 @@ async def _prepare_build(job):
         pkg = guardrails.build_package(raw or "")  
         if pkg is not None:  
             job.steps["build_ready"] = "\n\n".join(pkg["files"].values())  
-            job.steps["build_status"] = "ready"  
-            logger.info("[Job %s] build package: %d file(s) at level %d.",  
-                        job.id, len(pkg["files"]), job.complexity)  
-            return  
-        # Build attempt failed — escalate level and retry at a higher tier.  
-        if job.complexity >= MAX_LEVEL or gen_fn is None:  
-            _skip_build(job)  
-            logger.info("[Job %s] build skipped at level %d — no code "  
-                        "extracted.", job.id, job.complexity)  
+            if not remote:  
+                job.steps["build_status"] = "ready"  
+                logger.info("[Job %s] build package: %d file(s) at level "  
+                            "%d.", job.id, len(pkg["files"]), job.complexity)  
+                return  
+            ok, log = await _remote_build(job, pkg)  
+            job.steps["build_output"] = log  
+            job.touch(); save_job(job)  
+            if ok:  
+                job.steps["build_status"] = "passed"  
+                logger.info("[Job %s] remote build passed at level %d.",  
+                            job.id, job.complexity)  
+                return  
+            logger.info("[Job %s] remote build attempt %d failed at level "  
+                        "%d.", job.id, attempt, job.complexity)  
+        # Attempt failed — escalate level and retry at a higher tier.  
+        if (attempt >= max_attempts or job.complexity >= MAX_LEVEL  
+                or gen_fn is None):  
+            if pkg is None:  
+                _skip_build(job)  
+            else:  
+                job.steps["build_status"] = "failed"  
+            logger.info("[Job %s] build ended at level %d after %d "  
+                        "attempt(s).", job.id, job.complexity, attempt)  
             return  
         job.complexity = min(job.complexity + 1, MAX_LEVEL)  
         tier = _TIER_ORDER[job.complexity - 1]  
