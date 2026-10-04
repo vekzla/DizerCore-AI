@@ -7,9 +7,9 @@
 #  
 #   1. Detects a previous install and offers: wipe clean / reuse.  
 #   2. Asks for the Code-Agent's IP (the pi that will SSH in).  
-#   3. Lists ALL non-boot disks, user picks by number, typed ERASE ->  
-#      GPT + ext4 labelled "DizerCoreBuild". Re-run safe: unmounts  
-#      existing mounts of the disk first.  
+#   3. Lists ALL non-boot disks (zram/loop/ram excluded), user picks  
+#      by number, typed ERASE -> GPT + ext4 labelled "DizerCoreBuild".  
+#      Re-run safe: unmounts existing mounts of the disk first.  
 #   4. Mounts by UUID at /mnt/build (nofail + x-systemd.device-timeout).  
 #   5. Creates "dizercorebuild" user + ~/.ssh/authorized_keys  
 #      (preserved on "reuse" so the Code-Agent key survives).  
@@ -117,6 +117,7 @@ sudo apt-get install -y bubblewrap util-linux parted openssh-server || die "apt 
   
 # ==================================================================  
 # 2. Pick the build disk -- ALWAYS asks, numbered list, boot excluded  
+#    zram/loop/ram are virtual disks, never real storage -> excluded  
 # ==================================================================  
 mapfile -t disks < <(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}')  
 BOOT_SRC="$(findmnt -n -o SOURCE / 2>/dev/null || true)"  
@@ -131,7 +132,7 @@ esac
 declare -a cand=()  
 for d in "${disks[@]}"; do  
   [ -n "$BOOT_DISK" ] && [ "$d" = "$BOOT_DISK" ] && continue  
-  case "$d" in /dev/mmcblk*|/dev/loop*|/dev/ram*) continue;; esac  
+  case "$d" in /dev/mmcblk*|/dev/loop*|/dev/ram*|/dev/zram*) continue;; esac  
   sz="$(lsblk -ndo SIZE "$d" 2>/dev/null || echo '?')"  
   cand+=("$d"); ok "Detected non-boot disk: $d  $sz"  
 done  
@@ -203,8 +204,7 @@ ok "Mounting the build volume at ${BUILD_ROOT}"
 sudo mkdir -p "$BUILD_ROOT"  
 BLK_UUID="$(sudo blkid -s UUID -o value "$BLK_PART" || true)"  
 [ -n "$BLK_UUID" ] || die "blkid returned no UUID for $BLK_PART"  
-grep -q "$BLK_UUID" /etc/fstab || \  
-  echo "UUID=${BLK_UUID}  ${BUILD_ROOT}  ext4  defaults,nofail,x-systemd.device-timeout=5s  0  2" | sudo tee -a /etc/fstab >/dev/null  
+grep -q "$BLK_UUID" /etc/fstab || echo "UUID=${BLK_UUID}  ${BUILD_ROOT}  ext4  defaults,nofail,x-systemd.device-timeout=5s  0  2" | sudo tee -a /etc/fstab >/dev/null  
 sudo mount "$BLK_PART" "$BUILD_ROOT"  
 grep -q "$BLK_UUID" /proc/mounts || die "${BUILD_ROOT} did not mount."  
   
@@ -245,16 +245,13 @@ sudo chmod 755 "$BUILD_ROOT"
 # 8. Seed repo.git from the user-supplied URL (+ optional branch)  
 # ==================================================================  
 if [ -n "$SEED_REPO" ]; then  
+  sudo rm -rf "${BUILD_ROOT}/repo.git"  
   if [ -n "$SEED_BRANCH" ]; then  
     ok "Cloning ${SEED_REPO} (branch: ${SEED_BRANCH}) into ${BUILD_ROOT}/repo.git"  
-    sudo rm -rf "${BUILD_ROOT}/repo.git"  
-    sudo -u "$BUILD_USER" git clone --bare --branch "$SEED_BRANCH" --single-branch "$SEED_REPO" "${BUILD_ROOT}/repo.git" \  
-      || die "Clone failed — check the URL, the branch name, and network."  
+    sudo -u "$BUILD_USER" git clone --bare --branch "$SEED_BRANCH" --single-branch "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL, the branch name, and network."  
   else  
     ok "Cloning ${SEED_REPO} (default branch) into ${BUILD_ROOT}/repo.git"  
-    sudo rm -rf "${BUILD_ROOT}/repo.git"  
-    sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" \  
-      || die "Clone failed — check the URL and network."  
+    sudo -u "$BUILD_USER" git clone --bare "$SEED_REPO" "${BUILD_ROOT}/repo.git" || die "Clone failed — check the URL and network."  
   fi  
   sudo chown -R "${BUILD_USER}:${BUILD_USER}" "${BUILD_ROOT}/repo.git"  
   ok "repo.git seeded — tree-mode builds clone it locally"  
