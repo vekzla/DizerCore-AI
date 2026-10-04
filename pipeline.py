@@ -2,8 +2,9 @@
 # ----------------------------------------------------------------------------  
 # pipeline.py — the 3-agent pipeline runner.  
 # ChatGPT (OpenAI), Groq, Gemini each INDEPENDENTLY write code in parallel —  
-# no cross-checking. Complexity 1-5 picks ONE tier: 1-2 light, 3 normal,  
-# 4-5 heavy.  
+# no cross-checking. Jobs always start at level 1 (light tier) and  
+# auto-escalate 1->2->3 (light->normal->heavy) on build failures, capped at  
+# MAX_LEVEL.  
 #  
 # Judging (OpenRouter-only pool) starts as soon as EACH agent finishes.  
 # Judge access is serialized per job through an asyncio.Lock so the dedicated  
@@ -21,13 +22,16 @@ import asyncio
   
 import runtime  
 import guardrails  
-from config import JUDGE_MODELS, logger, tier_for  
+from config import JUDGE_MODELS, MAX_LEVEL, logger, tier_for  
 from db import State, save_job  
 from providers import (  
     gemini_generate, groq_generate, judge_confidence, openai_generate,  
 )  
   
 _TIER_ORDER = ("light", "normal", "heavy")  
+_AGENT_FNS = {"generate": openai_generate, "verify": groq_generate,  
+              "final": gemini_generate}  
+_LEVEL_NAMES = {1: "simple", 2: "normal", 3: "difficult"}  
   
   
 async def _run_agent(fn, enabled: bool, prompt: str, tier: str,  
@@ -110,25 +114,67 @@ def _fallback_winner(job) -> str | None:
     return None  
   
   
-def _prepare_build(job):  
-    """Guardrail gate: turn the winning RAW output into a clean code  
-    package. Writes job.steps['build_ready'] + 'build_status'. Never raises;  
-    never lets prose/comments leave the box as 'code'."""  
+def _skip_build(job):  
+    job.steps["build_ready"] = ""  
+    job.steps["build_status"] = "skipped"  
+    job.steps["build_output"] = (  
+        "No runnable code extracted from agent output "  
+        "(all responses were prose or empty).")  
+  
+  
+async def _prepare_build(job):  
+    """Guardrail gate + auto-escalating repair loop: turn the winning RAW  
+    output into a clean code package. On each failed build attempt the job  
+    level is bumped 1->2->3 (light->normal->heavy, capped at MAX_LEVEL) and  
+    the winning agent regenerates its output at the new tier. Writes  
+    job.steps['build_ready'] + 'build_status' (+ 'build_level' on  
+    escalation). Never raises; never lets prose/comments leave the box as  
+    'code'."""  
     winner_key = job.steps.get("_winner_key")  
     raw = job.steps.get(winner_key) if winner_key else ""  
-    pkg = guardrails.build_package(raw or "")  
-    if pkg is None:  
-        job.steps["build_ready"] = ""  
-        job.steps["build_status"] = "skipped"  
-        job.steps["build_output"] = (  
-            "No runnable code extracted from agent output "  
-            "(all responses were prose or empty).")  
-        logger.info("[Job %s] build skipped — no code extracted.", job.id)  
+  
+    if not job.stages.get("build"):  
+        # No build stage enabled — single extraction pass, level stays 1.  
+        pkg = guardrails.build_package(raw or "")  
+        if pkg is None:  
+            _skip_build(job)  
+            return  
+        job.steps["build_ready"] = "\n\n".join(pkg["files"].values())  
+        job.steps["build_status"] = "ready"  
         return  
-    job.steps["build_ready"] = "\n\n".join(pkg["files"].values())  
-    job.steps["build_status"] = "ready"  
-    logger.info("[Job %s] build package: %d file(s).",  
-                job.id, len(pkg["files"]))  
+  
+    gen_fn = _AGENT_FNS.get(winner_key)  
+    attempt = 0  
+    while True:  
+        attempt += 1  
+        pkg = guardrails.build_package(raw or "")  
+        if pkg is not None:  
+            job.steps["build_ready"] = "\n\n".join(pkg["files"].values())  
+            job.steps["build_status"] = "ready"  
+            logger.info("[Job %s] build package: %d file(s) at level %d.",  
+                        job.id, len(pkg["files"]), job.complexity)  
+            return  
+        # Build attempt failed — escalate level and retry at a higher tier.  
+        if job.complexity >= MAX_LEVEL or gen_fn is None:  
+            _skip_build(job)  
+            logger.info("[Job %s] build skipped at level %d — no code "  
+                        "extracted.", job.id, job.complexity)  
+            return  
+        job.complexity = min(job.complexity + 1, MAX_LEVEL)  
+        tier = _TIER_ORDER[job.complexity - 1]  
+        job.steps["build_level"] = (  
+            f"build attempt {attempt} failed — escalating to "  
+            f"{_LEVEL_NAMES[job.complexity]} tier "  
+            f"(level {job.complexity})")  
+        job.touch(); save_job(job)  
+        logger.info("[Job %s] escalating to level %d (%s tier).",  
+                    job.id, job.complexity, tier)  
+        out, _model = await gen_fn(job.prompt, tier=tier, job=job,  
+                                   key=winner_key)  
+        if out and not _is_skip(out):  
+            raw = out  
+            job.steps[winner_key] = out  
+            job.touch(); save_job(job)  
   
   
 async def run_job(job_id: str):  
@@ -197,7 +243,7 @@ async def run_job(job_id: str):
             _fallback_winner(job)  
         job.touch(); save_job(job)  
   
-        _prepare_build(job)  
+        await _prepare_build(job)  
         job.touch(); save_job(job)  
   
         job.state = State.DONE  
