@@ -1,12 +1,14 @@
 #!/usr/bin/env bash  
 # DizerCore-AI  
 # ==================================================================  
-# install-executor.sh — one-shot installer for pi2 "tadashi", the  
-# remote build executor for DizerCore-AI running on edith.  
+# install-executor.sh — one-shot installer for the remote build  
+# executor pi used by DizerCore-AI running on edith.  
 #  
+#   0. Asks for this machine's executor name (e.g. "buildpi") — used  
+#      for the ext4 volume label, optional hostname, and all output.  
 #   1. Detects the NVMe/SSD (excludes SD card / boot disk), lets the  
 #      user pick, then ALWAYS wipes it (typed ERASE confirmation) ->  
-#      new GPT + single ext4 partition labelled "TadashiBuild".  
+#      new GPT + single ext4 partition labelled "<Name>Build".  
 #   2. Mounts it by UUID at /mnt/build via fstab (nofail +  
 #      x-systemd.device-timeout=10).  
 #   3. Creates the "dizerbuild" service user + ~/.ssh/authorized_keys  
@@ -26,8 +28,9 @@ set -Eeuo pipefail
   
 BUILD_USER="dizerbuild"  
 BUILD_ROOT="/mnt/build"  
-NVME_LABEL="TadashiBuild"  
 USER_HOME="/home/${BUILD_USER}"  
+EXEC_NAME=""  
+NVME_LABEL=""  
   
 banner() { echo "============================================================"; echo " $1"; echo "============================================================"; }  
 ok()   { echo "==> $1"; }  
@@ -79,7 +82,7 @@ pick_build_disk() {
   
   local choice=""  
   while true; do  
-    read -r -p "Which disk is the tadashi build NVMe? [1-${#CANDS[@]}] " choice </dev/tty || true  
+    read -r -p "Which disk is the ${EXEC_NAME} build NVMe? [1-${#CANDS[@]}] " choice </dev/tty || true  
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#CANDS[@]}" ]; then  
       IFS='|' read -r BLK_DISK _sz _fs <<<"${CANDS[$((choice - 1))]}"  
       return 0  
@@ -90,7 +93,7 @@ pick_build_disk() {
   
 # ------------------------------------------------------------------  
 # wipe_build_disk — ERASE the picked disk: new GPT, one ext4 partition  
-# labelled TadashiBuild. Requires typing ERASE. Sets BLK_PART.  
+# labelled <ExecName>Build. Requires typing ERASE. Sets BLK_PART.  
 # ------------------------------------------------------------------  
 wipe_build_disk() {  
   echo ""  
@@ -124,10 +127,34 @@ wipe_build_disk() {
 }  
   
 # ==================================================================  
-# 0. Banner + previous-install cleanup  
+# 0. Banner + executor name + previous-install cleanup  
 # ==================================================================  
-banner "DizerCore build executor (tadashi) installer"  
+banner "DizerCore build executor installer"  
 require_tty  
+  
+echo ""  
+echo "Name this build executor (used for the disk label and hostname)."  
+echo "Examples: buildpi, executor1, pi2"  
+while true; do  
+  read -r -p "Executor name: " EXEC_NAME </dev/tty || true  
+  EXEC_NAME="$(echo "$EXEC_NAME" | tr -d '[:space:]')"  
+  if [[ "$EXEC_NAME" =~ ^[a-zA-Z][a-zA-Z0-9-]{0,30}$ ]]; then  
+    break  
+  fi  
+  warn "Use 1-31 chars: letters, digits, hyphens; must start with a letter."  
+done  
+NVME_LABEL="${EXEC_NAME}Build"  
+ok "Executor name: ${EXEC_NAME} (volume label: ${NVME_LABEL})"  
+  
+# Offer to set the system hostname to match.  
+CUR_HOST="$(hostname 2>/dev/null || true)"  
+if [ "$CUR_HOST" != "$EXEC_NAME" ]; then  
+  if confirm "Set this machine's hostname to '${EXEC_NAME}' (currently '${CUR_HOST}')?"; then  
+    echo "$EXEC_NAME" | sudo tee /etc/hostname >/dev/null  
+    sudo hostnamectl set-hostname "$EXEC_NAME" 2>/dev/null || sudo hostname "$EXEC_NAME" || true  
+    ok "Hostname set to ${EXEC_NAME}"  
+  fi  
+fi  
   
 PREV=0  
 id "$BUILD_USER" &>/dev/null && PREV=1  
@@ -153,7 +180,7 @@ sudo apt-get install -y git rsync build-essential cmake python3 \
   bubblewrap util-linux parted  
   
 # ==================================================================  
-# 2. NVMe — pick, ERASE-wipe, format as TadashiBuild  
+# 2. NVMe — pick, ERASE-wipe, format as <ExecName>Build  
 # ==================================================================  
 BLK_DISK=""  
 BLK_PART=""  
@@ -195,7 +222,7 @@ sudo chown -R "${BUILD_USER}:${BUILD_USER}" "${USER_HOME}/.ssh"
 ok "Creating build layout under ${BUILD_ROOT}"  
 sudo mkdir -p "${BUILD_ROOT}/jobs"          # rsync target, one dir per job  
 sudo mkdir -p "${BUILD_ROOT}/repo.git"      # seeded bare repo (tree mode)  
-if [ ! -d "${BUILD_ROOT}/repo.git/HEAD" ] && [ ! -f "${BUILD_ROOT}/repo.git/HEAD" ]; then  
+if [ ! -f "${BUILD_ROOT}/repo.git/HEAD" ]; then  
   sudo git init --bare "${BUILD_ROOT}/repo.git"  
 fi  
 sudo chown -R "${BUILD_USER}:${BUILD_USER}" "$BUILD_ROOT"  
@@ -205,8 +232,8 @@ sudo chmod 755 "$BUILD_ROOT"
 # 6. Done — hand back the authorized_keys path for install.sh section 9  
 # ==================================================================  
 echo ""  
-banner "Build executor ready"  
-echo " Host role:  tadashi (${BUILD_USER}@${HOSTNAME:-tadashi})"  
+banner "Build executor '${EXEC_NAME}' ready"  
+echo " Host role:  ${EXEC_NAME} (${BUILD_USER}@${EXEC_NAME})"  
 echo " Volume:     ${BLK_PART} mounted at ${BUILD_ROOT} (label ${NVME_LABEL})"  
 echo ""  
 echo " On edith, when install.sh section 9 shows the public key, append it to:"  
@@ -215,5 +242,5 @@ echo " (e.g.  sudo tee -a ${USER_HOME}/.ssh/authorized_keys <<< '<pubkey>')"
 echo ""  
 echo " Edith will run:"  
 echo "   rsync -> ${BUILD_ROOT}/jobs/<job_id>/"  
-echo "   ssh ${BUILD_USER}@<this-pi> prlimit + bwrap <build_cmd>"  
+echo "   ssh ${BUILD_USER}@${EXEC_NAME} prlimit + bwrap <build_cmd>"  
 echo "============================================================"
