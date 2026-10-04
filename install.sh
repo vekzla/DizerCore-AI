@@ -5,9 +5,9 @@
 # Auto-detects plugged-in SSDs (excludes the SD card / boot disk), lets  
 # the user pick the target, applies the UAS quirk hotfix automatically,  
 # then ALWAYS wipes the picked disk clean (new GPT label + single ext4  
-# # partition) after a typed ERASE confirmation. Mounts by UUID at  
+# partition) after a typed ERASE confirmation. Mounts by UUID at  
 # /mnt/dizerdata, writes the env file (OpenAI coder key + Groq + Gemini +  
-# required OpenRouter JUDGE key), installs the systemd service.
+# required OpenRouter JUDGE key), installs the systemd service.  
 #  
 # KEY BACKUP: the env file (API keys + admin password) is backed up to  
 # ~/dizercore.env.bak on the SD card, so reinstalls can restore keys  
@@ -35,6 +35,10 @@ USER_NAME="$(whoami)"
 QUIRK="usb-storage.quirks=152d:0578:u"  
 CMDLINE="/boot/firmware/cmdline.txt"  
   
+# Every variable Config.from_env() requires — used by the stale-backup  
+# guard and the fresh-write block. Keep in sync with config.py.  
+REQUIRED_KEYS=(GEMINI_API_KEY OPENAI_API_KEY GROQ_API_KEY OPENROUTER_API_KEY_JUDGE)  
+  
 banner() { echo "============================================================"; echo " $1"; echo "============================================================"; }  
 ok()   { echo "==> $1"; }  
 warn() { echo "!!  $1" >&2; }  
@@ -47,6 +51,17 @@ confirm() {
 }  
   
 require_tty() { [ -e /dev/tty ] || die "No TTY available; run in an interactive shell."; }  
+  
+# set_env KEY VALUE — rewrite KEY=VALUE in $ENV_FILE, or append if absent.  
+# Always produces exactly one line for the key.  
+set_env() {  
+  local key="$1" val="$2"  
+  if grep -q "^${key}=" "$ENV_FILE"; then  
+    sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"  
+  else  
+    printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"  
+  fi  
+}  
   
 # ------------------------------------------------------------------  
 # pick_ssd — scan block devices, exclude the boot disk, let the user  
@@ -285,6 +300,14 @@ if [ -f "$ENV_BAK" ]; then
     chmod 600 "$ENV_FILE"  
     ok "Restored keys to ${ENV_FILE}"  
     SKIP_KEYS=1  
+    # Stale-backup guard — every key Config.from_env() requires must be  
+    # present with a non-empty value, otherwise fall back to prompting.  
+    for req in "${REQUIRED_KEYS[@]}"; do  
+      if ! grep -q "^${req}=." "$ENV_FILE"; then  
+        warn "Backup is missing ${req} — will prompt for keys."  
+        SKIP_KEYS=0  
+      fi  
+    done  
   fi  
 fi  
   
@@ -295,14 +318,16 @@ if [ "$SKIP_KEYS" -eq 0 ]; then
   read -r -p "3. Groq API key (starts with gsk_): " GROQ_API_KEY </dev/tty  
   read -r -p "4. OpenRouter JUDGE API key (judging only, required): " OPENROUTER_API_KEY_JUDGE </dev/tty  
   [ -n "$OPENROUTER_API_KEY_JUDGE" ] || die "OpenRouter JUDGE key is required — the judge pool runs on OpenRouter."  
-fi
+fi  
   
 # Admin password is always prompted — even when keys were restored.  
+# Strip '|' since it is the sed delimiter used by set_env below.  
 read -r -p "Web UI ADMIN password (gates /delete-account page): " WEBUI_ADMIN_PASSWORD </dev/tty  
+WEBUI_ADMIN_PASSWORD="${WEBUI_ADMIN_PASSWORD//|/}"  
   
-# ================================================================  
+# ==================================================================  
 # 8. Write env file  
-# ================================================================  
+# ==================================================================  
 if [ "$SKIP_KEYS" -eq 0 ]; then  
   ok "Writing env file"  
   {  
@@ -311,7 +336,7 @@ if [ "$SKIP_KEYS" -eq 0 ]; then
     printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"  
     printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"  
     printf 'GROQ_API_KEY=%s\n' "$GROQ_API_KEY"  
-    printf 'OPENROUTER_API_KEY_JUDGE=%s\n' "$OPENROUTER_API_KEY_JUDGE"
+    printf 'OPENROUTER_API_KEY_JUDGE=%s\n' "$OPENROUTER_API_KEY_JUDGE"  
     printf 'WEBUI_ADMIN_PASSWORD=%s\n' "$WEBUI_ADMIN_PASSWORD"  
   } > "$ENV_FILE"  
   chmod 600 "$ENV_FILE"  
@@ -321,20 +346,14 @@ if [ "$SKIP_KEYS" -eq 0 ]; then
   chmod 600 "$ENV_BAK"  
   ok "Keys backed up to ${ENV_BAK} (SD card — survives future SSD wipes)"  
 else  
-  # Keys were restored — overwrite just the admin password line.  
-  if grep -q '^WEBUI_ADMIN_PASSWORD=' "$ENV_FILE"; then  
-    sed -i "s|^WEBUI_ADMIN_PASSWORD=.*|WEBUI_ADMIN_PASSWORD=${WEBUI_ADMIN_PASSWORD}|" "$ENV_FILE"  
-  else  
-    printf 'WEBUI_ADMIN_PASSWORD=%s\n' "$WEBUI_ADMIN_PASSWORD" >> "$ENV_FILE"  
-  fi  
-  ok "Admin password updated in ${ENV_FILE}"  
+  # Keys were restored — apply the freshly typed admin password and  
+  # force-rewrite path/port so stale backup values can't linger.  
+  ok "Applying settings to restored env file"  
+  set_env "WEBUI_ADMIN_PASSWORD" "$WEBUI_ADMIN_PASSWORD"  
+  set_env "DIZER_DATA_DIR"       "$DATA_DIR"  
+  set_env "PORT"                 "$PORT"  
+  ok "Admin password and paths updated in ${ENV_FILE}"  
 fi  
-  
-# Ensure DIZER_DATA_DIR/PORT are correct even when keys were restored  
-# (the backup may predate a mount-path or port change).  
-grep -q '^DIZER_DATA_DIR=' "$ENV_FILE" || printf 'DIZER_DATA_DIR=%s\n' "$DATA_DIR" >> "$ENV_FILE"  
-grep -q '^PORT=' "$ENV_FILE"          || printf 'PORT=%s\n' "$PORT"            >> "$ENV_FILE"
-
   
 # ==================================================================  
 # 9. Install systemd service  
